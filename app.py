@@ -54,6 +54,7 @@ import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Dict
+from urllib.parse import quote
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -268,6 +269,8 @@ if AUTH_ENABLED:
         "/api/auth/setup",
         "/api/auth/signup",
         "/api/auth/login",
+        "/api/auth/oidc/login",
+        "/api/auth/oidc/callback",
         "/api/auth/logout",
         "/api/auth/status",
         "/api/auth/features",
