@@ -68,6 +68,11 @@ def normalize_known_username(users: Dict[str, Any], username: str | None) -> Opt
     if not key or key not in users:
         return None
     return key
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() == "true"
 
 
 def _hash_password(password: str) -> str:
@@ -227,7 +232,9 @@ class AuthManager:
 
     @property
     def signup_enabled(self) -> bool:
-        return self._config.get("signup_enabled", False)
+        if "signup_enabled" in self._config:
+            return bool(self._config.get("signup_enabled"))
+        return _env_bool("AUTH_SIGNUP_ENABLE", False)
 
     @signup_enabled.setter
     def signup_enabled(self, value: bool):
@@ -259,7 +266,7 @@ class AuthManager:
                 return False
             return self.create_user(username, password, is_admin=True)
 
-    def create_user(self, username: str, password: str, is_admin: bool = False) -> bool:
+    def create_user(self, username: str, password: Optional[str], is_admin: bool = False, passwordless: bool = False) -> bool:
         """Create a new user account."""
         username = username.strip().lower()
         if not username:
@@ -267,18 +274,22 @@ class AuthManager:
         if username in RESERVED_USERNAMES:
             logger.warning("Refused to create reserved username '%s'", username)
             return False
-        with self._config_lock:
-            if username in self.users:
-                return False
-            if "users" not in self._config:
-                self._config["users"] = {}
-            self._config["users"][username] = {
-                "password_hash": _hash_password(password),
-                "created": time.time(),
-                "is_admin": is_admin,
-                "privileges": dict(ADMIN_PRIVILEGES if is_admin else DEFAULT_PRIVILEGES),
-            }
-            self._save()
+        if username in self.users:
+            return False
+        if "users" not in self._config:
+            self._config["users"] = {}
+        if passwordless or password is None:
+            password_hash = None
+        else:
+            password_hash = _hash_password(password)
+        self._config["users"][username] = {
+            "password_hash": password_hash,
+            "created": time.time(),
+            "is_admin": is_admin,
+            "privileges": dict(ADMIN_PRIVILEGES if is_admin else DEFAULT_PRIVILEGES),
+            "passwordless": bool(passwordless or password is None),
+        }
+        self._save()
         logger.info(f"Created user '{username}' (admin={is_admin})")
         return True
 
@@ -469,11 +480,14 @@ class AuthManager:
         username = username.strip().lower()
         if username not in self.users:
             return False
-        if not _verify_password(current_password, self.users[username]["password_hash"]):
-            return False
-        with self._config_lock:
-            self._config["users"][username]["password_hash"] = _hash_password(new_password)
-            self._save()
+        current_hash = self.users[username].get("password_hash")
+        passwordless = bool(self.users[username].get("passwordless"))
+        if not (passwordless and not (current_password or "").strip()):
+            if not current_hash or not _verify_password(current_password, current_hash):
+                return False
+        self._config["users"][username]["password_hash"] = _hash_password(new_password)
+        self._config["users"][username]["passwordless"] = False
+        self._save()
         return True
 
     # ------------------------------------------------------------------
@@ -569,7 +583,24 @@ class AuthManager:
         username = username.strip().lower()
         if username not in self.users:
             return False
-        return _verify_password(password, self.users[username]["password_hash"])
+        hashed = self.users[username].get("password_hash")
+        if not hashed:
+            return False
+        return _verify_password(password, hashed)
+
+    def create_session_for_user(self, username: str) -> Optional[str]:
+        """Create a session token for an already-authenticated user."""
+        username = username.strip().lower()
+        if username not in self.users:
+            return None
+        token = secrets.token_hex(32)
+        with self._sessions_lock:
+            self._sessions[token] = {
+                "username": username,
+                "expiry": time.time() + TOKEN_TTL,
+            }
+        self._save_sessions()
+        return token
 
     def create_session(self, username: str, password: str) -> Optional[str]:
         """Verify credentials and return a session token, or None."""
@@ -677,4 +708,5 @@ class AuthManager:
         }
         if authenticated:
             result["privileges"] = self.get_privileges(username)
+            result["passwordless"] = bool(self.users.get(username, {}).get("passwordless"))
         return result

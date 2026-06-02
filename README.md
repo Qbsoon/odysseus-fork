@@ -59,12 +59,61 @@ Help is welcome. The best entry points are fresh-install testing, provider setup
 
 ## Security
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly.
+Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_HOST` | `localhost` | Your LLM server (e.g. `llm-host.local:8000`) |
+| `LLM_HOSTS` | -- | Comma-separated list for model discovery |
+| `OPENAI_API_KEY` | -- | Optional OpenAI key. Prefer adding providers in the app unless pre-seeding. |
+| `SEARXNG_INSTANCE` | `http://localhost:8080` | SearXNG URL. Docker overrides this to `http://searxng:8080`. |
+| `SEARXNG_SECRET` | generated on first Docker boot | Optional SearXNG cookie/CSRF secret. Leave blank unless you need to pin it. |
+| `APP_BIND` | `127.0.0.1` | Docker Compose host bind address for the web UI. Use `0.0.0.0` only for intentional LAN/reverse-proxy access. |
+| `APP_PORT` | `7000` | Docker Compose host port for the web UI. |
+| `AUTH_ENABLED` | `true` | Enable/disable login |
+| `LOCALHOST_BYPASS` | `false` | Development-only auth bypass for loopback requests. Keep false for shared/network deployments. |
+| `SECURE_COOKIES` | `false` | Set true when serving Odysseus through HTTPS at a trusted proxy or private access gateway. |
+| `AUTHENTIK_ENABLE` | `false` | Enable the optional Authentik login provider. Admins can still override this in Settings. |
+| `AUTHENTIK_AUTO_CREATE_USERS` | `true` | Auto-create a local user on first Authentik login. Admins can still override this in Settings. |
+| `AUTHENTIK_ID` | -- | Authentik OIDC client ID. |
+| `AUTHENTIK_SECRET` | -- | Authentik OIDC client secret. |
+| `AUTHENTIK_ISSUER` | -- | Authentik issuer URL used for OIDC discovery. |
+| `AUTHENTIK_REDIRECT_URI` | -- | Optional explicit callback URL to register in Authentik. |
+| `AUTHENTIK_SCOPE` | `openid email profile` | OIDC scopes requested from Authentik. |
+| `AUTHENTIK_REQUIRE_EMAIL_VERIFIED` | `true` | Require the email claim to be verified before creating or logging in a user. |
+| `AUTH_SIGNUP_ENABLE` | `false` | Default local registration state when no saved auth config exists.
+| `DATABASE_URL` | `sqlite:///./data/app.db` | Database connection string |
+| `CHROMADB_HOST` | `localhost` | ChromaDB host for vector memory. Docker overrides this to `chromadb`. |
+| `CHROMADB_PORT` | `8100` | ChromaDB port for manual host runs. Docker overrides this to `8000`. |
+| `EMBEDDING_URL` | -- | OpenAI-compatible embeddings endpoint |
 
-- Keep `AUTH_ENABLED=true` for any network-accessible deployment.
-- Keep `LOCALHOST_BYPASS=false` outside local development.
+### Built-in MCP servers (optional setup)
 
-Deployment details are in the [setup guide](website/setup.md#security-notes).
+Odysseus auto-registers a few built-in MCP servers at startup. The npx-based ones (currently the browser server, `@playwright/mcp`) only start when their npm package is already in the local npx cache. If a package isn't cached, that server is skipped with a startup log message explaining what to do, so a fresh install does not block on a multi-minute npm download or hang if Playwright system deps are missing.
+
+If you enable Authentik, the login page shows a dedicated SSO button and the first successful login auto-creates a local account by default. Both behaviors can be overridden from the admin Users settings.
+
+To enable the browser MCP (page navigation, screenshots, vision), run once:
+
+```bash
+npx -y @playwright/mcp@latest --version
+```
+
+That installs `@playwright/mcp` plus Playwright (~300MB total). Restart Odysseus and the server will register at startup.
+
+## Architecture
+```
+app.py                   # FastAPI entry point
+core/      auth, database, middleware, constants
+src/       llm_core, agent_loop, agent_tools, chat_processor, search/
+routes/    chat, session, document, memory, model … endpoints
+services/  docs, memory, search, hwfit (Cookbook) …
+static/    index.html + app.js + style.css + js/ (modular front-end)
+docs/      landing page (index.html) + preview clips
+```
+
+## Data
+All user data lives in `data/` (gitignored): `app.db` (sessions, messages, documents),
+`memory.json`, `presets.json`, `uploads/`, `personal_docs/`, `chroma/`, `settings.json`.
 
 ## Star History
 
