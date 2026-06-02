@@ -368,6 +368,54 @@ function initShareDefaultsToggle() {
   });
 }
 
+function initAuthentikSettings() {
+  const enabledToggle = el('adm-authentikEnabledToggle');
+  const autoCreateToggle = el('adm-authentikAutoCreateToggle');
+  const statusEl = el('adm-authentikStatus');
+  if (!enabledToggle || !autoCreateToggle || !statusEl) return;
+
+  async function load() {
+    try {
+      const [statusRes, settingsRes] = await Promise.all([
+        fetch('/api/auth/status', { credentials: 'same-origin' }),
+        fetch('/api/auth/settings', { credentials: 'same-origin' }),
+      ]);
+      const status = await statusRes.json();
+      const settings = await settingsRes.json();
+      enabledToggle.checked = !!settings.authentik_enabled;
+      autoCreateToggle.checked = settings.authentik_auto_create_users !== false;
+      const configured = !!status.authentik_configured;
+      const active = !!settings.authentik_enabled;
+      statusEl.textContent = configured
+        ? (active ? 'Configured and enabled' : 'Configured, but disabled')
+        : 'Missing AUTHENTIK_ISSUER / AUTHENTIK_ID / AUTHENTIK_SECRET';
+      statusEl.style.color = configured ? 'color-mix(in srgb, var(--fg) 55%, transparent)' : 'var(--red)';
+    } catch (e) {
+      statusEl.textContent = 'Failed to load Authentik status';
+      statusEl.style.color = 'var(--red)';
+    }
+  }
+
+  async function save(payload) {
+    await fetch('/api/auth/settings', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    await load();
+  }
+
+  enabledToggle.addEventListener('change', async () => {
+    await save({ authentik_enabled: enabledToggle.checked });
+  });
+  autoCreateToggle.addEventListener('change', async () => {
+    await save({ authentik_auto_create_users: autoCreateToggle.checked });
+  });
+
+  load();
+}
+
 function initAddUser() {
   fetch('/api/auth/policy', { credentials: 'same-origin' })
     .then(r => r.ok ? r.json() : null)
@@ -3150,7 +3198,7 @@ function initLogsView() {
 function initAll() {
   modalEl = el('settings-modal');
   const inits = [
-    initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
+    initSignupToggle, initAuthentikSettings, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
     () => settingsModule.initIntegrations()
   ];
