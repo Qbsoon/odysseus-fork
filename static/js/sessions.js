@@ -1866,10 +1866,6 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     const _isTransientChat = !!_meta && (_meta.folder === 'Assistant' || _meta.folder === 'Tasks');
     if (!_isTransientChat) {
       Storage.set('lastSessionId', id);
-      // Update URL hash without triggering hashchange handler
-      if (window.location.hash !== '#' + id) {
-        history.replaceState(null, '', '#' + id);
-      }
     }
     // Restore character preset for persistent chats
     try {
