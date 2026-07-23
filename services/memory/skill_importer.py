@@ -74,7 +74,6 @@ def _is_text_file(name: str) -> bool:
 # Max redirect hops to follow manually while re-validating each one.
 _MAX_FETCH_REDIRECTS = 5
 
-
 def _validated_ips(raw_ips: List[str]) -> List[ipaddress._BaseAddress]:
     """Parse and de-duplicate one resolver snapshot in resolver order."""
     ips: List[ipaddress._BaseAddress] = []
