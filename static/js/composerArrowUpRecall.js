@@ -1,5 +1,9 @@
 /**
  * ArrowUp on the composer recalls previous user messages from this chat.
+ *
+ * History recall only takes over the arrow keys once the caret sits on the
+ * boundary row of the composer (first row for ArrowUp, last row for
+ * ArrowDown); inside the text the keys keep their native caret movement.
  */
 
 /**
@@ -35,6 +39,25 @@ export function getUserMessagesFromChatHistory(root = document) {
  */
 export function getLastUserMessageFromChatHistory(root = document) {
   return getUserMessagesFromChatHistory(root)[0] || '';
+}
+
+/**
+ * Calculate the row index of the caret in a textarea
+ * to determine if the arrow keys should recall history or move the caret.
+ *
+ * @param {HTMLTextAreaElement | any} el
+ * @returns {{ startRow: number, endRow: number, rows: number }}
+ */
+function caretRowInfo(el) {
+  const value = String(el && el.value != null ? el.value : '');
+  const start = Number.isFinite(el?.selectionStart) ? el.selectionStart : value.length;
+  const end = Number.isFinite(el?.selectionEnd) ? el.selectionEnd : start;
+  const rowOf = (pos) => value.slice(0, pos).split('\n').length - 1;
+  return {
+    startRow: rowOf(start),
+    endRow: rowOf(end),
+    rows: value.split('\n').length,
+  };
 }
 
 /**
@@ -83,6 +106,12 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
     if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
     if (e.isComposing) return;
     if (typeof window !== 'undefined' && window._ghostAutocomplete?.isActive?.()) return;
+
+    // Ensures ArrowUp/ArrowDown only take over when the caret is on the first/last row of the composer.
+    const rows = caretRowInfo(composer);
+    if (e.key === 'ArrowUp' && (rows.startRow > 0 || rows.endRow > 0)) return;
+    if (e.key === 'ArrowDown' &&
+        (rows.startRow < rows.rows - 1 || rows.endRow < rows.rows - 1)) return;
 
     const freshHistory = readHistory();
     const history = freshHistory.length ? freshHistory : recallHistory;
@@ -143,9 +172,9 @@ export function wireArrowUpRecall(composer, getUserMessages, options = {}) {
       return;
     }
 
-    // ArrowUp owns prompt history in the chat composer. If the current text
-    // is not already a recalled prompt, start from newest instead of letting
-    // the browser move the caret inside the textarea.
+    // ArrowUp owns prompt history in the chat composer once the caret sits on
+    // the first row. If the current text is not already a recalled prompt,
+    // start from newest instead of letting the browser move the caret inside the textarea.
     const nextIndex = currentIndex >= 0 ? Math.min(currentIndex + 1, history.length - 1) : 0;
     const recalled = history[nextIndex];
     if (!recalled) {

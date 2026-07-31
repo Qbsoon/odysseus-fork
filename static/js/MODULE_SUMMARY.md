@@ -63,7 +63,7 @@ The largest and most central subsystem. Chat submission → backend SSE → prog
 | **`streamingSegmenter.js`** | Splits a token stream into display units (text vs code fences) for `streamingRenderer.js`. |
 | **`slashCommands.js`** | Slash-command registry (`/help`, `/setup`, etc.), parsing, and dispatch handlers. Exported functions are consumed by `chat.js` and `slashAutocomplete.js`. |
 | **`slashAutocomplete.js`** | Composer autocomplete popup for `/` commands. |
-| **`composerArrowUpRecall.js`** | Recall last user message with `↑` on an empty composer. |
+| **`composerArrowUpRecall.js`** | Recall last user message with `↑` on the composer. Only hijacks keys when the caret is on the first/last row (native caret movement wins inside the text). |
 | **`assistant.js`** | Assistant/persona behaviors and message styling helpers. |
 | **`tts-ai.js`** | AI text-to-speech manager, enqueueing, streaming TTS, and playback button injection. |
 | **`voiceRecorder.js`** | Voice recording from the composer microphone. |

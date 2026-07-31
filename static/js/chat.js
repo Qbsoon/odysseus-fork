@@ -22,7 +22,7 @@ import codeRunnerModule from './codeRunner.js';
 import slashCommands, { initSlashCommands, isCommand, handleSlashCommand, handleSetupInput, handleSetupWizard, typewriterInto } from './slashCommands.js?v=20260722emailfastindex1';
 import createResearchSynapse from './researchSynapse.js';
 import { createStreamRenderer } from './streamingRenderer.js';
-import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260714promptrecall';
+import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArrowUpRecall.js?v=20260731promptrecall';
 
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
