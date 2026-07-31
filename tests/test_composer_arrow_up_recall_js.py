@@ -7,9 +7,11 @@ when `node` is not installed rather than failing.
 Locks in: empty composer recalls user messages from the active conversation,
 repeated ArrowUp walks older prompts in that same chat; non-empty composer is
 untouched unless it contains the recalled prompt; multiline caret navigation is
-not hijacked; Shift/Alt/Ctrl/Meta+ArrowUp are ignored; IME composition does not
-trigger recall; messages are read from #chat-history (dataset.raw), not session
-sidebar metadata.
+not hijacked — Arrows keep native caret movement while the caret is
+not on the first/last row, and only start walking history once the caret
+reaches that boundary row; Shift/Alt/Ctrl/Meta+ArrowUp are ignored; IME
+composition does not trigger recall; messages are read from #chat-history
+(dataset.raw), not session sidebar metadata.
 """
 import json
 import shutil
@@ -153,6 +155,70 @@ def test_multiline_caret_navigation_preserved():
     assert out["value"] == text
     assert out["selectionStart"] == len(text)
     assert out["prevented"] == [False]
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_arrow_up_moves_caret_before_walking_older_history():
+    recalled = "first line\nsecond line\nthird line"
+    out = _run([{
+        "initial": recalled,
+        "caret": len(recalled),
+        "history": [recalled, "older prompt"],
+    }])[0]
+    assert out["value"] == recalled
+    assert out["prevented"] == [False]
+    assert out["stopped"] == [False]
+    assert out["immediateStopped"] == [False]
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_arrow_up_on_first_row_walks_older_history():
+    recalled = "first line\nsecond line"
+    out = _run([{
+        "initial": recalled,
+        "caret": 0,
+        "history": [recalled, "older prompt"],
+    }])[0]
+    assert out["value"] == "older prompt"
+    assert out["selectionStart"] == len("older prompt")
+    assert out["prevented"] == [True]
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_arrow_down_moves_caret_before_walking_newer_history():
+    recalled = "line a\nline b"
+    out = _run([{
+        "initial": recalled,
+        "caret": 0,
+        "history": [recalled],
+        "event": {"key": "ArrowDown"},
+    }])[0]
+    assert out["value"] == recalled
+    assert out["prevented"] == [False]
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_arrow_down_on_last_row_walks_back_to_blank():
+    recalled = "line a\nline b"
+    out = _run([{
+        "initial": recalled,
+        "caret": len(recalled),
+        "history": [recalled],
+        "event": {"key": "ArrowDown"},
+    }])[0]
+    assert out["value"] == ""
+    assert out["prevented"] == [True]
+
+
+@pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
+def test_single_line_recall_walks_history_immediately():
+    out = _run([{
+        "initial": "newer prompt",
+        "caret": len("newer prompt"),
+        "history": ["newer prompt", "older prompt"],
+    }])[0]
+    assert out["value"] == "older prompt"
+    assert out["prevented"] == [True]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")
