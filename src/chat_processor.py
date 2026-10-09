@@ -483,7 +483,9 @@ class ChatProcessor:
                         max_tokens=50,
                         timeout=15,
                         thinking_mode="off",
-                    )
+                        session_id=getattr(session, "id", None),
+                    ).strip()
+                    
                     # Models without a reasoning parser put thinking in the content.
                     generated_query = strip_think(generated_query, prose=False, prompt_echo=False).strip()
 
