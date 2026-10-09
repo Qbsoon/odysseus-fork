@@ -11,6 +11,7 @@ import re
 import os
 import math
 import ipaddress
+import uuid
 from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
@@ -1298,13 +1299,26 @@ def _apply_local_generation_stability(payload: Dict, url: str, model: str) -> No
         payload["max_tokens"] = 2048
 
 
-def _provider_headers(provider: str, headers: Optional[Dict] = None) -> Dict[str, str]:
+# Fallback x-opencode-session id for OpenCode Go calls with no session id
+# (background summaries, title generation, etc.). Generated once per process
+# so Go keeps a stable routing/cache identity for session-less requests.
+_OPENCODE_GO_FALLBACK_SESSION_ID = uuid.uuid4().hex
+
+
+def _provider_headers(provider: str, headers: Optional[Dict] = None,
+                      session_id: Optional[str] = None) -> Dict[str, str]:
     h = {"Content-Type": "application/json"}
     if isinstance(headers, dict):
         h.update(headers)
     if provider == "openrouter":
         h.setdefault("HTTP-Referer", "https://github.com/odysseus-dev/odysseus")
         h.setdefault("X-OpenRouter-Title", "Odysseus")
+    if provider == "opencode-go":
+        # Ensure the Opencode-required header is present.
+        h.setdefault(
+            "x-opencode-session",
+            str(session_id) if session_id else _OPENCODE_GO_FALLBACK_SESSION_ID,
+        )
     if provider == "copilot":
         # Ensure the Copilot-required headers are present even when the caller
         # didn't pass pre-built headers (e.g. model listing). build_headers()
@@ -2286,9 +2300,10 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
              max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
              timeout: int = LLMConfig.DEFAULT_TIMEOUT, prompt_type: Optional[str] = None,
              thinking_mode: Optional[str] = None,
-             reasoning_effort: Optional[str] = None) -> str:
+             reasoning_effort: Optional[str] = None,
+             session_id: Optional[str] = None) -> str:
     """Synchronous LLM call with optional prompt type enhancement."""
-    h = _provider_headers(_detect_provider(url))
+    h = _provider_headers(_detect_provider(url), session_id=session_id)
     # Tolerate headers that arrive as a JSON string (some sessions stored them
     # double-encoded) — otherwise h.update() throws "dictionary update sequence
     # element #0 has length 1; 2 is required".
@@ -2742,7 +2757,7 @@ async def llm_call_async(
         )
     else:
         target_url = _normalize_openai_chat_url(url)
-        h = _provider_headers(provider, headers)
+        h = _provider_headers(provider, headers, session_id=session_id)
         if provider == "copilot":
             from src.copilot import apply_request_headers
             apply_request_headers(h, messages_copy)
@@ -3050,7 +3065,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload, target_url, model, thinking_mode
         )
         _scrub_openai_chat_tool_reasoning(payload, target_url, model)
-        h = _provider_headers(provider, headers)
+        h = _provider_headers(provider, headers, session_id=session_id)
         if provider == "copilot":
             from src.copilot import apply_request_headers
             apply_request_headers(h, messages_copy)

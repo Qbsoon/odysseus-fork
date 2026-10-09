@@ -436,6 +436,7 @@ class ChatProcessor:
                         temperature=0.1,
                         max_tokens=50,
                         timeout=15,
+                        session_id=getattr(session, "id", None),
                     ).strip()
 
                     if generated_query:
