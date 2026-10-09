@@ -1080,10 +1080,15 @@ def _detect_provider(url: str) -> str:
         return "ollama"
     if _host_match(url, "anthropic.com"):
         return "anthropic"
-    if _host_match(url, "opencode.ai/zen/go"):
-        return "opencode-go"
-    if _host_match(url, "opencode.ai/zen"):
-        return "opencode-zen"
+    # OpenCode: the Zen/Go variant lives in the URL path, but _host_match only
+    # compares hostnames — so the variant must be resolved from the path here.
+    # A bare *.opencode.ai URL without /zen stays generic OpenAI-compatible.
+    if _host_match(url, "opencode.ai"):
+        path = (urlparse(url).path or "").rstrip("/")
+        if "/zen/go" in path:
+            return "opencode-go"
+        if "/zen" in path:
+            return "opencode-zen"
     if _host_match(url, "openrouter.ai"):
         return "openrouter"
     if _host_match(url, "groq.com"):
@@ -1339,8 +1344,10 @@ def _provider_label(url: str) -> str:
     if _host_match(url, "x.ai"): return "xAI"
     if _host_match(url, "openai.com"): return "OpenAI"
     if _host_match(url, "openrouter.ai"): return "OpenRouter"
-    if _host_match(url, "opencode.ai/zen/go"): return "OpenCode Go"
-    if _host_match(url, "opencode.ai/zen"): return "OpenCode Zen"
+    if _host_match(url, "opencode.ai"):
+        path = (urlparse(url).path or "").rstrip("/")
+        if "/zen/go" in path: return "OpenCode Go"
+        if "/zen" in path: return "OpenCode Zen"
     if _host_match(url, "groq.com"): return "Groq"
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url): return "ChatGPT Subscription"
