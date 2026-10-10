@@ -23916,7 +23916,7 @@ async def stream_agent_loop(
                 DEFAULT_HARD_MAX,
                 budget_is_explicit as _budget_is_explicit,
             )
-            from src.model_context import budget_context_for_model
+            from src.model_context import DEFAULT_CONTEXT, budget_context_for_model
 
             candidate_context = budget_context_for_model(
                 candidate_url,
@@ -23939,6 +23939,16 @@ async def stream_agent_loop(
                     if candidate_context > 0
                     else runtime_context_window
                 )
+            elif candidate_context <= 0:
+                # Unproven window (budget_context_for_model returns 0 for
+                # unknown models). Budget against the same DEFAULT_CONTEXT the
+                # rest of the app already assumes for unknown models (plain
+                # chat, compaction, the GUI meter) instead of collapsing to the
+                # conservative 6000-token default, which trimmed multi-turn
+                # history to a few recent turns (OpenCode Go history loss,
+                # 2026-10-10). A provider that cannot actually hold this much
+                # rejects the request and context recovery trims + retries.
+                candidate_context = DEFAULT_CONTEXT
             _route_context_lengths[(candidate_url, candidate_model)] = candidate_context
             soft_budget = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
             if soft_budget <= 0:
@@ -23961,11 +23971,17 @@ async def stream_agent_loop(
                 budget_is_explicit,
                 hard_max=hard_max,
             )
-            if candidate_context <= 8192:
-                # Small local servers often tokenize chat wrappers and tool
-                # results much more generously than our rough estimator. Keep
-                # substantial headroom for those wrappers and generation so a
-                # follow-up tool round cannot exceed the server's n_ctx.
+            if 0 < candidate_context <= 8192:
+                # Small KNOWN-context servers often tokenize chat wrappers and
+                # tool results much more generously than our rough estimator.
+                # Keep substantial headroom for those wrappers and generation
+                # so a follow-up tool round cannot exceed the server's n_ctx.
+                # The `0 <` guard keeps unknown windows (before the
+                # DEFAULT_CONTEXT substitution above) out of this branch: with
+                # context=0 the clamp used to collapse the budget to 1200
+                # tokens and trim_for_context's last-ditch pass then dropped
+                # the whole conversation except the latest user message
+                # (OpenCode Go history loss, 2026-10-10).
                 effective_budget = min(
                     effective_budget,
                     max(1200, int(candidate_context * 0.40)),

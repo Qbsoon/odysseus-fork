@@ -178,6 +178,27 @@ KNOWN_CONTEXT_WINDOWS = {
     'grok-3': 131072,
     'grok-2': 131072,
 
+    # --- OpenCode (Zen / Go gateway) ---
+    # The opencode.ai /models catalog reports no context-window fields, so
+    # without entries here every Go model reads as "unknown" and the agent
+    # route budget collapses to the conservative default, trimming multi-turn
+    # history to a few thousand tokens. Values follow OpenCode's published
+    # per-model context tiers where documented; GLM-5.x and MiMo-V2.6 use the
+    # app-wide DEFAULT_CONTEXT floor (Go's own usage tables show 50-90K
+    # cached-request shapes, so the real windows are at least that large).
+    'glm-5.3-flash': 128000,
+    'glm-5.3': 128000,
+    'glm-5.2': 128000,
+    'qwen3.7-plus': 256000,
+    'grok-4.5': 200000,
+    'grok-4.6': 200000,
+    'grok-4.7': 200000,
+    'gpt-6-luna': 272000,
+    'gpt-5.6-luna': 272000,
+    'claude-haiku-5-5': 100000,
+    'mimo-v2.6-pro': 1048576,
+    'mimo-v2.6-flash': 1048576,
+
     # --- Meta / Llama ---
     'llama-4': 1048576,
     'llama-3.3': 131072,
