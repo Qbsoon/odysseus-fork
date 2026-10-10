@@ -117,7 +117,7 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="manage_memory",
-            description="Manage the user's memory system: list, add, edit, delete, or search memories.",
+            description="Manage the user's memory system: list, add, edit, delete, or search memories. Pinning/unpinning is user-only (memories panel).", 
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -150,6 +150,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _text_result("Error: Memory manager not available")
 
     action = arguments.get("action", "")
+
+    # Pinning is user-only: the memories panel is the only way to pin or unpin.
+    if action in {"pin", "unpin"}:
+        return _text_result(
+            "Error: Pinning is user-only. Use the memories panel to pin or "
+            "unpin memories; they can still be listed, added, edited, "
+            "deleted, or searched here."
+        )
 
     if action == "list":
         category_filter = arguments.get("category", "")

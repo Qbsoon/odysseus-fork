@@ -870,7 +870,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_memory",
-            "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions.",
+            "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions. Pinning/unpinning is user-only (memories panel) — this tool cannot pin or unpin.", 
             "parameters": {
                 "type": "object",
                 "properties": {

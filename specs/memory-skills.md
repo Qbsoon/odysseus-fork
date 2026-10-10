@@ -30,7 +30,7 @@ This spec covers persistent memory and user skills in:
 Chat memory behavior:
 
 - chat preferences and incognito state gate memory preface use;
-- pinned memories are loaded for the owner;
+- pinned memories are loaded for the owner and injected into every prompt; pinning is user-only (the memories panel is the only pin/unpin writer, and auto-extraction never pins);
 - retrieved memories use keyword matching plus optional vector scoring;
 - inserted memory is wrapped as untrusted context;
 - memory use counts are incremented after insertion.
