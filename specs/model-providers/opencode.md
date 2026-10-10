@@ -1,6 +1,6 @@
 # OpenCode Provider Shape
 
-Last updated: dev@2e2bb52 | 2026-10-09
+Last updated: dev@2e2bb52 | 2026-10-10
 
 ## Scope
 
@@ -27,6 +27,12 @@ as background summaries or title generation). The header is set with
 ## Fallback And Current Gaps
 
 Exact `*.opencode.ai` plus configured `/zen` or `/zen/go` selects this family.
+The Go `/v1/models` catalog lists only `id`/`created`/`owned_by` — no context
+window fields — so Go model ids are pinned in the app-wide
+`KNOWN_CONTEXT_WINDOWS` table (OpenCode-published tiers where documented,
+`DEFAULT_CONTEXT` floor for GLM-5.x and MiMo-V2.6) until the catalog reports
+real values. How unknown windows are budgeted is app-wide behavior, documented
+with the context budget, not here.
 No provider-specific rich capability catalog is mapped, and runtime still has
 separate variant labels that should eventually become structured endpoint
 metadata.
