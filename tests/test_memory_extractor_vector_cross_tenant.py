@@ -134,17 +134,8 @@ def test_vector_match_from_other_tenant_does_not_drop_users_fact(monkeypatch):
     )
 
 
-def test_identity_auto_pin_stops_after_first_five_for_owner(monkeypatch):
-    mm = FakeMemoryManager([
-        {
-            "id": f"seed-{idx}",
-            "text": f"Seed identity {idx}",
-            "owner": "userA",
-            "category": "identity",
-            "pinned": True,
-        }
-        for idx in range(5)
-    ])
+def test_auto_extracted_identity_is_never_pinned(monkeypatch):
+    mm = FakeMemoryManager([])
     _install_llm_stub(
         monkeypatch,
         '[{"text": "User works as an architect", "category": "identity", "evidence": "My role is architect"}]',
@@ -160,6 +151,8 @@ def test_identity_auto_pin_stops_after_first_five_for_owner(monkeypatch):
     rows = mm.load(owner="userA")
     added = next(r for r in rows if r["text"] == "User works as an architect")
     assert added.get("category") == "identity"
+    # Pinning is user-only: auto-extracted facts are never pinned, even
+    # identity/contact ones.
     assert added.get("pinned") is not True
     assert sum(1 for r in rows if r.get("category") == "identity" and r.get("pinned")) == 5
 
