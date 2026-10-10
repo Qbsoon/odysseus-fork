@@ -405,6 +405,11 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 
     action = lines[0].strip().lower()
 
+    # Pinning is user-only: the memories panel is the only way to pin or unpin.
+    # Every other memory action remains available to the model.
+    if action in {"pin", "unpin"}:
+        return {"error": "Pinning is user-only. Ask the user to pin or unpin memories in the memories panel; memories can still be listed, added, edited, deleted, or searched here."}
+
     if action == "list":
         category_filter = lines[1].strip().lower() if len(lines) > 1 and lines[1].strip() else None
         memories = _memory_manager.load(owner=owner)

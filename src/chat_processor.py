@@ -90,58 +90,26 @@ class ChatProcessor:
     # Minimum similarity score for RAG results to be injected
     RAG_SIMILARITY_THRESHOLD = 0.35
     MEMORY_CONTEXT_LIMIT = 5
-    PINNED_MEMORY_LIMIT = MEMORY_CONTEXT_LIMIT
-    CORE_MEMORY_AUTO_INJECT_LIMIT = 5
-
-    def _is_core_memory(self, memory: Dict[str, Any]) -> bool:
-        """Return whether a pinned memory is safe to keep globally available."""
-        category = (memory.get("category") or "").lower()
-        if category in {"identity", "contact"}:
-            return True
-        text = (memory.get("text") or "").lower()
-        return any(marker in text for marker in (
-            "my name is",
-            "name is",
-            "call me",
-            "i am ",
-            "i'm ",
-            "email",
-            "phone",
-            "address",
-        ))
+    # Pinned memories are user-curated "always apply" facts: every pinned
+    # memory is injected into every prompt. The limit is only a sanity bound
+    # against a pathological store size — never a relevance filter.
+    PINNED_MEMORY_LIMIT = 50
 
     def _select_pinned_memories(self, message: str, pinned: list) -> list:
-        """Keep pinned memories high-priority without injecting all of them.
+        """Return every pinned memory — pinning means "always send".
 
-        Pinned used to mean "always send every pinned memory to the model".
-        That bloats every request and leaks unrelated personal context into
-        tasks that do not need it. Now only a small set of core identity/contact
-        memories is always available; other pinned memories must match the
-        current request, but are retrieved before ordinary memories.
+        Pinned memories are curated by the user (the UI pin route is the only
+        writer), so relevance-filtering them here would second-guess that
+        curation: a pinned "respond efficiently" preference almost never
+        keyword-matches an arbitrary request and would silently never reach
+        the model. Only unpinned memories go through relevance retrieval.
         """
         if not pinned:
             return []
 
-        core = [
-            m for m in pinned
-            if self._is_core_memory(m)
-        ][:self.CORE_MEMORY_AUTO_INJECT_LIMIT]
-
-        core_ids = {m.get("id") for m in core if m.get("id")}
-        contextual_candidates = [
-            m for m in pinned
-            if not (m.get("id") and m.get("id") in core_ids)
-        ]
-        remaining_slots = max(self.PINNED_MEMORY_LIMIT - len(core), 0)
-        contextual = self._hybrid_retrieve(
-            message,
-            contextual_candidates,
-            k=remaining_slots,
-        ) if remaining_slots else []
-
         selected = []
         seen = set()
-        for memory in [*core, *contextual]:
+        for memory in pinned:
             key = memory.get("id") or memory.get("text")
             if key in seen:
                 continue
@@ -325,23 +293,26 @@ class ChatProcessor:
                 ),
             ))
 
-        # Memory: core pinned facts + relevant pinned/extended recall.
+        # Memory: all pinned facts (always) + relevant unpinned recall.
         self._last_used_memories = []  # track what was injected
-        if use_memory and not self._is_memory_management_request(message):
+        if use_memory:
             mem_entries = self.memory_manager.load(owner=owner)
 
             pinned = [m for m in mem_entries if m.get("pinned")]
             extended = [m for m in mem_entries if not m.get("pinned")]
 
             _used_ids: list = []
+            # Pinned memories are injected into every prompt — including
+            # explicit memory-management commands. Skipping them there is
+            # exactly how pinned style preferences got lost.
             selected_pinned = self._select_pinned_memories(message, pinned)
             if selected_pinned:
                 pinned_text = "\n- ".join([m["text"] for m in selected_pinned])
                 preface.append(untrusted_context_message(
                     "saved memory: pinned context",
                     (
-                        "Pinned memory context. Some pinned memories are only "
-                        f"included when relevant:\n- {pinned_text}"
+                        "Pinned memory context. The user pinned these; always "
+                        f"apply them:\n- {pinned_text}"
                     ),
                 ))
                 for m in selected_pinned:
@@ -349,9 +320,12 @@ class ChatProcessor:
                     if m.get("id"):
                         _used_ids.append(m["id"])
 
-            remaining_memory_slots = max(self.MEMORY_CONTEXT_LIMIT - len(self._last_used_memories), 0)
-            if extended and remaining_memory_slots:
-                relevant = self._hybrid_retrieve(message, extended, k=remaining_memory_slots)
+            # Unpinned memories keep their own full relevance budget: pinned
+            # memories no longer consume recall slots, so a pinned-heavy store
+            # cannot starve ordinary recall. Explicit memory-management
+            # commands still skip the recalled block only.
+            if extended and not self._is_memory_management_request(message):
+                relevant = self._hybrid_retrieve(message, extended, k=self.MEMORY_CONTEXT_LIMIT)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(

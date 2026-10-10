@@ -135,7 +135,6 @@ AUDIT_SYSTEM_PROMPT = (
 )
 
 AUDIT_INTERVAL = 5  # audit every N new memories added
-AUTO_PINNED_IDENTITY_LIMIT = 5
 
 
 def _is_owner_memory(entry, owner):
@@ -144,11 +143,6 @@ def _is_owner_memory(entry, owner):
     return True
 
 
-def _is_auto_pinned_identity(entry):
-    return (
-        bool(entry.get("pinned"))
-        and (entry.get("category") or "").lower() in {"identity", "contact"}
-    )
 _extractions_since_audit = 0
 
 
@@ -438,10 +432,6 @@ async def extract_and_store(
             logger.error("Skipping auto memory extraction, store unreadable: %s", e)
             return
         added = 0
-        auto_pinned_identity_count = sum(
-            1 for entry in existing
-            if _is_owner_memory(entry, _owner) and _is_auto_pinned_identity(entry)
-        )
 
         for fact in facts:
             if isinstance(fact, str):
@@ -491,15 +481,8 @@ async def extract_and_store(
                 continue
 
             entry = memory_manager.add_entry(fact_text, source="auto", category=category, owner=_owner)
-            # Auto-pin only the first few identity/contact facts. Extra identity
-            # memories are still saved, but they must be recalled by relevance
-            # instead of riding along in every prompt forever.
-            if (
-                category.lower() in {"identity", "contact"}
-                and auto_pinned_identity_count < AUTO_PINNED_IDENTITY_LIMIT
-            ):
-                entry["pinned"] = True
-                auto_pinned_identity_count += 1
+            # Pinning is user-only: auto-extracted facts are never pinned, so
+            # only memories the user explicitly pins ride along in every prompt.
             if hasattr(session, "session_id"):
                 entry["session_id"] = session.session_id
             elif hasattr(session, "name"):
