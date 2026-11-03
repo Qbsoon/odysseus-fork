@@ -87,6 +87,10 @@ _BUILTIN_NPX_SERVERS = {
 
 # Global flag to disable MCP if there are compatibility issues
 MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_MCP", "").lower() in ("1", "true", "yes")
+# Kill just the built-in email MCP server (its subprocess never spawns, so
+# no email tools exist anywhere in the app). Narrower than ODYSSEUS_DISABLE_MCP,
+# which also removes memory / rag / image_gen / browser built-ins.
+EMAIL_MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_EMAIL_MCP", "").lower() in ("1", "true", "yes")
 BROWSER_MCP_REQUIRE_CACHE = os.environ.get("ODYSSEUS_BROWSER_MCP_REQUIRE_CACHE", "").lower() in ("1", "true", "yes")
 
 
@@ -191,6 +195,11 @@ async def register_builtin_servers(mcp_manager):
             logger.warning(f"Built-in MCP server {name} error: {type(e).__name__}: {e}")
 
     for server_id, (script, name) in _BUILTIN_SERVERS.items():
+        if server_id == "email" and EMAIL_MCP_DISABLED:
+            logger.info(
+                "Built-in email MCP server disabled via ODYSSEUS_DISABLE_EMAIL_MCP"
+            )
+            continue
         script_path = os.path.join(base_dir, script)
         if not os.path.exists(script_path):
             logger.warning(f"Built-in MCP server script not found: {script_path}")

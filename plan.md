@@ -559,9 +559,27 @@ The user disabled many tools (96 → 42 sent) but the 19 `mcp__email__*`
    tool disappears from the request instead of staying visible-but-blocked.
    Tests in `tests/test_full_inventory_prompt.py` (both directions, empty
    inputs, qualified-disable drops the bare prose section, source-level
-   guard that the loop applies the expansion at entry). NOT yet executed.
+   guard that the loop applies the expansion at entry). All green 2026-11-04.
    Not done (still optional): surfacing built-in servers in the Integrations
    list for per-tool control.
+
+### Email system disable switch (2026-11-04, user approved)
+
+User asked how to disable the email system entirely. Pieces: agent tools
+(Tools tab — done, verified live), pollers (`ODYSSEUS_INPROCESS_POLLERS=0`,
+existed), and the built-in email MCP subprocess — which had NO dedicated
+switch (`ODYSSEUS_DISABLE_MCP` kills all built-ins). DONE 2026-11-04:
+`ODYSSEUS_DISABLE_EMAIL_MCP=1` in `src/builtin_mcp.py` skips registering
+the email built-in server — the `email_server.py` subprocess never spawns,
+so no email tools exist anywhere in the app (schemas, prose, catalog, tool
+index). Other built-ins unaffected. Documented in
+`scripts/generate_env_reference.py`, `website/configuration-reference.md`,
+and `.env.example`. Tests:
+`tests/test_builtin_mcp_email_disable.py` (email skipped + others still
+register; registers by default; narrow gate ≠ global MCP_DISABLED). Full
+disable recipe: `ODYSSEUS_DISABLE_EMAIL_MCP=1` +
+`ODYSSEUS_INPROCESS_POLLERS=0` (email HTTP routes stay mounted but are
+inert without accounts).
 
 ---
 
@@ -628,7 +646,33 @@ full-surface turns (the common hosted shape):
 Tests: `tests/test_full_inventory_prompt.py` —
 `test_mcp_catalog_describes_all_enabled_mcp_tools`,
 `test_full_surface_skips_similarity_retrieval` (loop-level: get_tool_index
-  must not be called). NOT yet executed.
+  must not be called). All green 2026-11-04.
+
+### Live verification (2026-11-04, user's deployed instance, same session shape)
+
+Before → after, from `[chat-prep-timing]` / `[agent-timing]` / `[llm-ttft]`:
+
+| Stage | Before (21:26 log) | After (23:10 log) |
+| --- | --- | --- |
+| chat pre-flight (`chat-prep-timing total`) | 32.07s (web_search=31.89) | **0.053s** (no web_search stage) |
+| agent prep (`prep_done` sum) | 0.78s (tool_selection 0.62) | **0.05s** (tool_selection 0.005) |
+| provider TTFT (`[llm-ttft]`) | 21.2s | **4.1s / 7.7s / 6.4s** (three requests) |
+| tools_sent | 96 | **23** — every disable respected, incl. all `mcp__email__*` gone (alias fix verified live) |
+
+The remaining turn-1 wait (20.5s to first visible token) was the
+user-approved `web_search` tool executing in-stream: SearXNG ~8s + page
+fetches ~8s wall — CORRECTION 2026-11-04: the fetches were never serial;
+`comprehensive_web_search` already uses a ThreadPoolExecutor with
+`max_workers=4` (`services/search/core.py`). The ~8s was the slowest
+pages' latency under concurrency, so there is no parallelization left to
+do. The only remaining lever there is SearXNG's own ~8s query time (the
+user's instance). Also observed working: the Task 1 approval continuation
+(sealed `web_fetch` executed first on resume, then the run continued). Note: these turns show
+`[tool-rag] Using caller-provided relevant_tools` — the turn contract
+supplied the tool set, so the loop's retrieval block (and with it the new
+full-surface skip branch) was bypassed by the earlier caller-provided
+branch. Same outcome — no chroma query ran (`tool_selection` 0.005s); the
+skip branch covers turns where the contract provides no set.
 
 ---
 
