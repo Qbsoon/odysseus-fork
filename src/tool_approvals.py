@@ -38,6 +38,15 @@ if TYPE_CHECKING:
 DEFAULT_APPROVAL_TTL_SECONDS = 10 * 60
 DEFAULT_MAX_PENDING_APPROVALS = 2048
 
+# Which gate proposed the card: the post-external-context security gate, or
+# the interactive admission of an operation the user's request never granted.
+# Digest-bound so a consumed approval always replays the gate that sealed it.
+PROPOSAL_KIND_EXTERNAL_CONTEXT = "external_context"
+PROPOSAL_KIND_REQUEST_AUTHORITY = "request_authority"
+_VALID_PROPOSAL_KINDS = frozenset(
+    {PROPOSAL_KIND_EXTERNAL_CONTEXT, PROPOSAL_KIND_REQUEST_AUTHORITY}
+)
+
 
 def _normalized_owner(owner: Any) -> str:
     return str(owner or "").strip().casefold()
@@ -121,6 +130,7 @@ def _binding_payload(
     document_version: Any,
     document_digest: Any,
     external_untrusted_context_seen: bool,
+    proposal_kind: str,
     selected_tools: Any,
     continuation_query: Any,
     effects: tuple[str, ...],
@@ -145,6 +155,7 @@ def _binding_payload(
         ),
         "document_digest": str(document_digest or "").strip().lower(),
         "external_untrusted_context_seen": bool(external_untrusted_context_seen),
+        "proposal_kind": str(proposal_kind),
         "selected_tools": list(
             _normalized_selected_tools(selected_tools, required_tool=tool_name)
         ),
@@ -173,6 +184,7 @@ class PendingToolApproval:
     document_version: int | None
     document_digest: str
     external_untrusted_context_seen: bool
+    proposal_kind: str
     effects: tuple[str, ...]
     result_integrity: str
     digest: str
@@ -194,9 +206,42 @@ class PendingToolApproval:
     browser_operation: BoundBrowserOperation | None = None
 
     def public_payload(self, *, reason: str | None = None) -> dict[str, Any]:
+        if reason is None and self.proposal_kind == PROPOSAL_KIND_REQUEST_AUTHORITY:
+            reason = (
+                "Your request didn't explicitly authorize this action, so "
+                "continuing with it needs your approval."
+            )
+        if self.proposal_kind == PROPOSAL_KIND_REQUEST_AUTHORITY:
+            # Scope wording must match what each scope actually grants here:
+            # the approved tool's class of action for this request, plus the
+            # chat-session untrusted-context bypass for later requests.
+            task_option_description = (
+                "Execute the sealed action and allow this same tool without "
+                "re-asking for the rest of this request. Current tool, "
+                "account, workspace, and sandbox restrictions still apply."
+            )
+            chat_option_description = (
+                "Execute the sealed action and allow this same tool without "
+                "re-asking for the rest of this request. Later requests in "
+                "this chat also skip the untrusted-context gate. Current "
+                "tool, account, workspace, and sandbox restrictions still "
+                "apply."
+            )
+        else:
+            task_option_description = (
+                "Execute the sealed action and allow every otherwise-gated "
+                "action needed to finish this request. Current tool, account, "
+                "workspace, and sandbox restrictions still apply."
+            )
+            chat_option_description = (
+                "Execute the sealed action and stop asking at this gate for "
+                "later requests in this chat. Current tool, account, workspace, "
+                "and sandbox restrictions still apply."
+            )
         return {
             "kind": "tool_approval",
             "approval_id": self.approval_id,
+            "proposal_kind": self.proposal_kind,
             # The browser already owns this chat id. Persisting it with the
             # resolved card lets history-derived session grants remain bound to
             # this exact chat and prevents inheritance by a forked session.
@@ -210,20 +255,12 @@ class PendingToolApproval:
                 {
                     "label": "Allow for this task",
                     "value": TASK_APPROVAL_DECISION,
-                    "description": (
-                        "Execute the sealed action and allow every otherwise-gated "
-                        "action needed to finish this request. Current tool, account, "
-                        "workspace, and sandbox restrictions still apply."
-                    ),
+                    "description": task_option_description,
                 },
                 {
                     "label": "Allow for this chat session",
                     "value": CHAT_SESSION_APPROVAL_DECISION,
-                    "description": (
-                        "Execute the sealed action and stop asking at this gate for "
-                        "later requests in this chat. Current tool, account, workspace, "
-                        "and sandbox restrictions still apply."
-                    ),
+                    "description": chat_option_description,
                 },
                 {
                     "label": "Deny",
@@ -296,6 +333,7 @@ class ExactToolApproval:
             external_untrusted_context_seen=(
                 self.pending.external_untrusted_context_seen
             ),
+            proposal_kind=self.pending.proposal_kind,
             selected_tools=self.pending.selected_tools,
             continuation_query=self.pending.continuation_query,
             effects=effects,
@@ -387,6 +425,7 @@ class ToolApprovalStore:
         selected_tools: Any = None,
         continuation_query: Any = None,
         external_untrusted_context_seen: bool,
+        proposal_kind: str = PROPOSAL_KIND_EXTERNAL_CONTEXT,
         capabilities: ToolCapabilities,
         request_text: Any = "",
         request_authority: RequestAuthority | None = None,
@@ -394,6 +433,8 @@ class ToolApprovalStore:
     ) -> PendingToolApproval:
         if request_authority is not None and not isinstance(request_authority, RequestAuthority):
             raise TypeError("Approval authority must be server-owned RequestAuthority")
+        if str(proposal_kind or "") not in _VALID_PROPOSAL_KINDS:
+            raise ValueError("Unknown approval proposal kind")
         now = time.time()
         from src.agent_runtime.authority import ExactOperation
         from src.agent_runtime.resource_binding import NATIVE_FILESYSTEM_TOOLS, resolve_filesystem_operation
@@ -483,6 +524,7 @@ class ToolApprovalStore:
             document_version=document_version,
             document_digest=document_digest,
             external_untrusted_context_seen=external_untrusted_context_seen,
+            proposal_kind=proposal_kind,
             selected_tools=selected_tools,
             continuation_query=continuation_query,
             effects=effects,
@@ -508,6 +550,7 @@ class ToolApprovalStore:
             external_untrusted_context_seen=payload[
                 "external_untrusted_context_seen"
             ],
+            proposal_kind=payload["proposal_kind"],
             effects=effects,
             result_integrity=result_integrity,
             digest=_canonical_digest(payload),

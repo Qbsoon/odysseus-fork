@@ -68,8 +68,20 @@ It is on unless `ODYSSEUS_TOOL_APPROVAL_GATE` is set to a falsy value (`0`/`fals
 
 Two exemptions apply even when the gate is on, both deliberate:
 
-- Sources in `_CONTROL_PLANE_CONTEXT_SOURCES` (skills, runtime descriptors, the open editor document, the open email, uploaded files) are treated as control-plane metadata and still permit read-only tools.
+- Sources in `_CONTROL_PLANE_CONTEXT_SOURCES` (skills, runtime descriptors, the open editor document, the open email, uploaded files) are treated as control-plane metadata and still permit read-only tools, plus the brokered `web_fetch` reader — its `NETWORK_EGRESS` effect reflects the model-supplied URL the backend opens, not a local mutation, and the URL/tool policy remains the sandbox. Genuinely external taint (a real web, document, or tool result) still blocks it.
 - A TUI run that advertises a host shell bridge and declares `unattended_mode` exempts the local execution set in `TUI_CLIENT_TOOL_NAMES`. Personal, network and deployment-local tools are never exempted.
+
+### Request-authority admission — interactive, not a hard error
+
+Request authority (`src/agent_runtime/authority.py`) grants only what the user's request text implies. Every dispatched operation is classified (`classify_request_admission` in `src/tool_execution.py`) as one of:
+
+- **admitted** — a grant, or a consumed exact approval, covers it;
+- **denied** — an explicit denial (tool policy, denied set, `block_all`, `disable_mcp`, malformed arguments). Never prompt-able; the call fails with `failure_kind: "request_authority_denied"`;
+- **ungranted** — no grant covers it, but nothing explicitly denies it. The agent loop proposes an approval card (`proposal_kind: "request_authority"`) instead of returning the error to the model.
+
+Only the ungranted case is prompt-able — an approval never sits on top of an explicit denial. Delegated credentials, unattended runs, teacher runs, and runs with no bound (or an inherited) authority keep the hard denial: there is no one to ask, or no authority that could seal the action.
+
+Approving seals the exact action and its resource identities at proposal time. Task- and chat-session scope then widen the resumed run's authority with a grant for the approved tool — action-scoped where the operation is action-classified, tool-scoped otherwise — so the same tool does not re-prompt within the request. The widened authority is policy-restricted afterwards, so explicit denials are never lifted by an approval. Denying silences that exact operation for the rest of the run (retries get an error result, never a second card); a new user message starts a clean run. Later requests in a chat session keep only the external-context bypass — the persisted session marker does not carry grants.
 
 ## Security Headers
 

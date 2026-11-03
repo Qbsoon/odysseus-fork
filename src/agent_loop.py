@@ -21019,7 +21019,9 @@ def _blocks_before_inference(turn_contract) -> bool:
     )
 
 
-from src.agent_runtime.authority import MISSING_AUTHORITY, active_request_authority, with_request_authority
+from src.agent_runtime.authority import (
+    MISSING_AUTHORITY, RequestAuthority, active_request_authority, with_request_authority,
+)
 
 
 @with_request_authority
@@ -21070,6 +21072,7 @@ async def stream_agent_loop(
     reasoning_effort: Optional[str] = None,
     _parent_run_id: Optional[str] = None,
     request_authority=MISSING_AUTHORITY,
+    run_denied_signatures: Optional[Set[str]] = None,
     context_resolution=None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
@@ -24819,6 +24822,12 @@ async def stream_agent_loop(
     _last_browser_open_signature = ""
     _failed_call_history: dict[str, dict[str, Any]] = {}
     _successful_read_call_history: dict[str, dict[str, Any]] = {}
+    # A denied operation stays denied for the rest of this run — retries get
+    # the error result, never a second card. Distinct operations each get
+    # their own card, and an approved tool executes freely afterwards. The
+    # state lives in this invocation, so a new user message (a new run)
+    # starts clean and may propose the same action again.
+    _run_denied_signatures = frozenset(run_denied_signatures or ())
     _tui_local_network_completed = False
     _web_search_queries: list[str] = []
     # A web lookup is sufficient evidence for the current request. Once one
@@ -33204,6 +33213,43 @@ async def stream_agent_loop(
             # executed tool call in the streamed trace so canonical decoding
             # can correlate the attempted action with its rejection result.
             _execution_attempted = False
+            # Pre-check the sealed request authority: an operation the user's
+            # request never granted — but that no policy explicitly denies —
+            # gets an approval card instead of a hard error. Skipped whenever
+            # another gate already owns the decision (explicit policy denial,
+            # external-context gate, delegated credential, unattended runtime)
+            # and for the synthetic local-media observation, which must run.
+            _authority_precheck = None
+            _bound_request_authority = active_request_authority()
+            if (
+                security_decision.allowed
+                and not blocked_by_tool_policy
+                and not blocked_by_disabled_tools
+                and not broad_host_read_reason
+                and not _ody_clamped_tool_allowed
+                and not _auto_local_media_evidence
+                and not _allow_local_media_discovery
+                and not run_security.delegated_credential
+                and not _unattended_native_runtime
+                and not _is_teacher_run
+                # Only a bound, non-inherited request authority can seal an
+                # ungranted action: with no authority bound the execution path
+                # keeps its hard error, and an inherited (child) authority may
+                # only narrow its parent, so an approval it proposes could
+                # never execute after being granted.
+                and isinstance(_bound_request_authority, RequestAuthority)
+                and not _bound_request_authority.inherited
+            ):
+                from src.tool_execution import classify_request_admission
+                _authority_precheck = classify_request_admission(
+                    block,
+                    owner=owner,
+                    session_id=session_id,
+                    workspace=workspace,
+                    tool_policy=tool_policy,
+                    disabled_tools=disabled_tools,
+                    exact_approval=exact_approval,
+                )
             if _blocked_user_bounded_execution_retry:
                 desc = f"{block.tool_type}: BLOCKED BY USER EXECUTION BOUND"
                 result = {
@@ -33445,6 +33491,108 @@ async def stream_agent_loop(
                     }
                     logger.info(
                         "Exact approval required before tool start: %s",
+                        block.tool_type,
+                    )
+            elif (
+                _authority_precheck is not None
+                and _authority_precheck.status == "ungranted"
+            ):
+                # The user's request never granted this operation, but no
+                # policy explicitly denies it. Propose an approval with the
+                # same sealing as the external-context gate instead of
+                # returning the hard error. Explicit denials never reach this
+                # branch (the pre-check classifies them as "denied" and
+                # execution hard-fails as before).
+                approval_document = (
+                    active_document
+                    if block.tool_type
+                    in {"edit_document", "suggest_document", "update_document"}
+                    else None
+                )
+                if (
+                    block.tool_type
+                    in {"edit_document", "suggest_document", "update_document"}
+                    and (
+                        approval_document is None
+                        or getattr(approval_document, "id", None) is None
+                        or getattr(approval_document, "version_count", None) is None
+                    )
+                ):
+                    # Same guard as the external-context gate: an approval
+                    # without a sealed document target could never execute
+                    # after being granted.
+                    desc = f"{block.tool_type}: BLOCKED"
+                    result = {
+                        "error": (
+                            "Open the exact document to edit, then request this "
+                            "action again so its id and version can be sealed."
+                        ),
+                        "exit_code": 1,
+                        "blocked": True,
+                        "policy": "exact_tool_approval_target",
+                    }
+                elif _call_signature in _run_denied_signatures:
+                    desc = f"{block.tool_type}: BLOCKED"
+                    result = {
+                        "error": (
+                            "This exact operation was denied by the user for "
+                            "this run. Do not retry it; continue without it or "
+                            "answer from the evidence already collected."
+                        ),
+                        "exit_code": 1,
+                        "blocked": True,
+                        "failure_kind": "request_authority_ungranted",
+                        "policy": "user_denied",
+                    }
+                    logger.info(
+                        "[agent] user-denied operation blocked without a card: %s",
+                        block.tool_type,
+                    )
+                else:
+                    approval_selected_tools = set(_relevant_tools or ())
+                    approval_selected_tools.update(
+                        name for name in _tool_names_sent if name
+                    )
+                    approval_selected_tools.add(block.tool_type)
+                    approval_selected_tools.difference_update(disabled_tools)
+                    pending_approval = tool_approval_store.create(
+                        owner=owner,
+                        session_id=session_id,
+                        origin_run_id=run_security.run_id,
+                        tool_name=block.tool_type,
+                        content=block.content,
+                        workspace=workspace,
+                        document_id=getattr(approval_document, "id", None),
+                        document_version=getattr(approval_document, "version_count", None),
+                        document_digest=(
+                            document_content_digest(
+                                getattr(approval_document, "current_content", "")
+                            )
+                            if approval_document is not None
+                            else None
+                        ),
+                        external_untrusted_context_seen=(
+                            run_security.external_untrusted_context_seen
+                        ),
+                        proposal_kind="request_authority",
+                        selected_tools=approval_selected_tools,
+                        continuation_query=_retrieval_query or _last_user,
+                        capabilities=capabilities_for_action(
+                            block.tool_type, block.content
+                        ),
+                        request_text=_last_user,
+                        request_authority=active_request_authority(),
+                        client_runtime_context=client_runtime_context,
+                    )
+                    desc = f"{block.tool_type}: APPROVAL REQUIRED"
+                    result = {
+                        "output": "Waiting for an exact user approval.",
+                        "exit_code": None,
+                        "approval_required": True,
+                        "ask_user": pending_approval.public_payload(),
+                    }
+                    logger.info(
+                        "Request-authority approval required before tool start: %s",
                         block.tool_type,
                     )
             else:

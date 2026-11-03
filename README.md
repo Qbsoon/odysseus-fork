@@ -67,7 +67,7 @@ Help is welcome. The best entry points are fresh-install testing, provider setup
 
 ## Security
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
+Odysseus is a self-hosted workspace with powerful local tools. Keep `AUTH_ENABLED=true` for any network-accessible deployment. Keep `LOCALHOST_BYPASS=false` outside local development. Keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
 | Variable | Default | Description |
 |---|---|---|
 | `LLM_HOST` | `localhost` | Your LLM server (e.g. `llm-host.local:8000`) |

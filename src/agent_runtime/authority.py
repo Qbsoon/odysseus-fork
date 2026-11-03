@@ -473,6 +473,37 @@ def _request_text(messages):
     return ""
 
 
+def widen_authority_for_approval(authority, approval):
+    """Add the approved action's grant to a resumed run's authority.
+
+    Task- and chat-session scope mean the user authorized this class of
+    action for the continuation, so the resumed run must not re-prompt for
+    the same tool. The grant is action-scoped where the approved operation is
+    action-classified (a manage_memory list stays a list grant) and
+    tool-scoped otherwise. Explicit denials are never lifted: callers
+    policy-restrict the widened authority afterwards, and restricted() always
+    wins over grants.
+    """
+    if approval is None or not getattr(approval, "allow_remaining_actions", False):
+        return authority
+    if not isinstance(authority, RequestAuthority):
+        return authority
+    pending = getattr(approval, "pending", None)
+    if pending is None:
+        return authority
+    try:
+        operation = ExactOperation.normalize(pending.tool_name, pending.content)
+    except (ValueError, TypeError):
+        return authority
+    if operation.action:
+        grant = OperationGrant(operation.tool, actions=frozenset({operation.action}))
+    else:
+        grant = OperationGrant(operation.tool)
+    if any(existing.tool == grant.tool for existing in authority.grants):
+        return authority
+    return replace(authority, grants=tuple(authority.grants) + (grant,))
+
+
 def with_request_authority(func):
     """Bind once per invocation; model rounds/fallbacks never recreate grants."""
     call_signature = signature(func)
@@ -506,6 +537,8 @@ def with_request_authority(func):
             raise TypeError("Missing or malformed server request authority")
         if parent is None and parameters.get("exact_approval") is not None:
             authority = replace(authority, inherited=False)
+            authority = widen_authority_for_approval(
+                authority, parameters.get("exact_approval"))
         authority = authority.restrict(parameters.get("tool_policy"), parameters.get("disabled_tools"))
         with bind_request_authority(authority) as effective:
             if "request_authority" in parameters:

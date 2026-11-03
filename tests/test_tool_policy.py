@@ -1,12 +1,14 @@
 import asyncio
 import json
 import sys
+from dataclasses import replace as _replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import src.agent_loop as al
+from src.agent_runtime.authority import OperationGrant, RequestAuthority
 from src.agent_tools import ToolBlock
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 from src.tool_policy import (
@@ -1102,7 +1104,16 @@ def test_web_fetch_js_failure_exposes_private_browser_next_round(monkeypatch):
         al.stream_agent_loop(
             "https://api.openai.com/v1",
             "local-model",
-            [{"role": "user", "content": "open the official SpaceX Starship launches page"}],
+            # The request must explicitly grant web_fetch: an ungranted fetch
+            # now proposes an approval card instead of executing, which would
+            # bypass the fallback path under test.
+            [{
+                "role": "user",
+                "content": (
+                    "web_fetch https://www.spacex.com/launches/ and if the "
+                    "page needs JavaScript use the private browser instead"
+                ),
+            }],
             max_rounds=2,
             relevant_tools={"web_search", "web_fetch"},
         )
@@ -1257,6 +1268,12 @@ def test_private_browser_bot_check_switches_next_round_to_static_web(monkeypatch
                 "ask_user",
                 "update_plan",
             },
+            # The request text grants no browser tool; bind one so the fetch
+            # executes instead of proposing an approval card.
+            request_authority=_replace(
+                RequestAuthority.empty(owner="", session_id="", workspace=""),
+                grants=(OperationGrant("private_browser"),),
+            ),
         )
     )
 
@@ -3552,6 +3569,13 @@ def test_notes_panel_open_plus_create_keeps_both_tool_calls(monkeypatch):
             max_rounds=1,
             owner="sft_alex_creator",
             relevant_tools={"ui_control", "manage_notes"},
+            # Both calls must execute: bind the grants the request text does
+            # not provide, so neither call proposes an approval card.
+            request_authority=_replace(
+                RequestAuthority.empty(
+                    owner="sft_alex_creator", session_id="", workspace=""),
+                grants=(OperationGrant("ui_control"), OperationGrant("manage_notes")),
+            ),
         )
     )
 

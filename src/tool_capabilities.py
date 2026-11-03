@@ -876,6 +876,24 @@ class ToolRunSecurityContext:
         )
         if control_plane_only and capabilities.known and not (capabilities.effects - read_only_effects):
             return ToolGateDecision(True)
+        if (
+            control_plane_only
+            and tool_name == "web_fetch"
+            and ToolEffect.BROKERED_NETWORK_READ in capabilities.effects
+            and capabilities.effects - read_only_effects == {ToolEffect.NETWORK_EGRESS}
+        ):
+            # web_fetch is an intentionally brokered public reader: the backend
+            # opens a supplied URL and the URL/tool policy remains the sandbox.
+            # Its capability carries NETWORK_EGRESS only because the backend
+            # opens a model-supplied URL, not because the call mutates or
+            # executes anything. Control-plane descriptors (skills index,
+            # runtime context) are server-owned metadata, not external result
+            # content, so they must not turn every "search → fetch this page"
+            # continuation into an approval prompt. Genuinely external taint
+            # (web/document/tool results) still blocks it via
+            # POST_EXTERNAL_BLOCKED_EFFECTS below. Mirrors the carve-out in
+            # clean_agent_preview's effect policy.
+            return ToolGateDecision(True)
         if control_plane_only and tool_name == "manage_skills":
             try:
                 action = str(json.loads(content or "{}").get("action") or "").strip().lower()

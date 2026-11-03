@@ -46,9 +46,35 @@ async def test_availability_and_model_selection_do_not_grant_execution(monkeypat
             security_context=execution.NO_TOOL_SECURITY_CONTEXT,
             request_authority=authority("transcribe_media"))
     assert "BLOCKED" in description
-    assert result["failure_kind"] == "request_authority_denied"
+    # bash was never granted by the user's request text: ungranted, not
+    # explicitly denied by policy or a denied set.
+    assert result["failure_kind"] == "request_authority_ungranted"
     implementation.assert_not_awaited()
     offered_handler.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prepared,expected", [
+    ("ungranted", "request_authority_ungranted"),
+    ("denied_set", "request_authority_denied"),
+    ("block_all", "request_authority_denied"),
+])
+async def test_ungranted_and_restricted_denials_are_distinguishable(prepared, expected):
+    """Only explicitly denied operations keep the hard denial marker."""
+    from src import tool_execution as execution
+    base = authority("transcribe_media")
+    if prepared == "ungranted":
+        request_authority = base
+    elif prepared == "denied_set":
+        request_authority = replace(base, denied=frozenset({"bash"}))
+    else:
+        request_authority = base.restrict(ToolPolicy(block_all_tool_calls=True))
+    _, result = await execution.execute_tool_block(
+        ToolBlock("bash", "echo 'ungranted probe'"), owner="alice", session_id="s",
+        security_context=execution.NO_TOOL_SECURITY_CONTEXT,
+        request_authority=request_authority)
+    assert result["failure_kind"] == expected
+    assert result["blocked"] is True
 
 
 @pytest.mark.parametrize("user_text,allowed,denied", [

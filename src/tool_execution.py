@@ -1645,6 +1645,93 @@ from src.browser_identity import (
 )
 
 
+@dataclass(frozen=True)
+class AdmissionDecision:
+    """Outcome of the sealed request-authority admission prelude.
+
+    status is one of:
+      - "admitted": a grant (or an exact approval) covers the operation.
+      - "ungranted": no grant covers it, but nothing explicitly denies it.
+        This is the only classification an interactive approval may lift.
+      - "denied": an explicit denial (tool policy, denied set, block_all,
+        disable_mcp, or invalid arguments). Never prompt-able.
+    """
+
+    status: str
+    reason: str = ""
+    operation: Any = None
+    authority: Any = None
+    exact_admission: bool = False
+    # True only when the prelude itself failed (malformed arguments), which
+    # historically reported an "invalid arguments" description.
+    invalid_arguments: bool = False
+
+
+def classify_request_admission(
+    block: Any,
+    *,
+    owner: Optional[str] = None,
+    session_id: Optional[str] = None,
+    workspace: Optional[str] = None,
+    tool_policy: Optional[Any] = None,
+    disabled_tools: Optional[set] = None,
+    request_authority: Any = MISSING_AUTHORITY,
+    exact_approval: Optional[ExactToolApproval] = None,
+) -> AdmissionDecision:
+    """Classify whether the sealed request authority admits this operation.
+
+    Shared by execute_tool_block and the agent loop's pre-dispatch check: an
+    ungranted but not explicitly denied operation becomes an approval prompt
+    instead of a hard error. Mirrors the exact semantics of the execution
+    path, including the parent-authority intersection and the policy
+    restriction.
+    """
+    tool_name = getattr(block, "tool_type", None)
+    authority = (
+        active_request_authority() if request_authority is MISSING_AUTHORITY else request_authority
+    )
+    parent = active_request_authority()
+    if isinstance(authority, RequestAuthority) and parent is not None and authority is not parent:
+        authority = parent.intersect(authority)
+    try:
+        operation = ExactOperation.normalize(tool_name, getattr(block, "content", None))
+        valid = isinstance(authority, RequestAuthority) and authority.bound_to(
+            owner=owner, session_id=session_id, workspace=workspace)
+        if valid:
+            authority = authority.restrict(tool_policy, disabled_tools)
+        exact_admission = bool(
+            valid and not authority.inherited and not authority.restricted(operation)
+            and exact_approval is not None and exact_approval.matches(
+                owner=owner, session_id=session_id, workspace=workspace,
+                tool_name=tool_name, content=getattr(block, "content", None)))
+    except (ValueError, TypeError) as error:
+        return AdmissionDecision(
+            "denied",
+            (f"Tool arguments are not valid JSON: {error}"
+             if isinstance(error, json.JSONDecodeError) else str(error)),
+            invalid_arguments=True,
+        )
+    if valid and (authority.permits(operation) or exact_admission):
+        return AdmissionDecision(
+            "admitted", operation=operation, authority=authority,
+            exact_admission=exact_admission)
+    if tool_policy and any(
+            tool_policy.blocks(name) for name in email_tool_policy_names(tool_name)):
+        return AdmissionDecision(
+            "denied",
+            f"Execution of tool '{tool_name}' is forbade by the active tool policy.",
+            operation=operation, authority=authority)
+    if isinstance(authority, RequestAuthority) and authority.restricted(operation):
+        return AdmissionDecision(
+            "denied",
+            "The exact operation is disabled by user or server request authority policy.",
+            operation=operation, authority=authority)
+    return AdmissionDecision(
+        "ungranted",
+        "The exact operation is outside server request authority.",
+        operation=operation, authority=authority)
+
+
 @record_action
 async def execute_tool_block(
     block: Any,
@@ -1692,39 +1779,28 @@ async def execute_tool_block(
             decision = security_context.decision_for(block.tool_type, block.content)
             return blocked_tool_result(block.tool_type, decision.reason)
 
-    authority = active_request_authority() if request_authority is MISSING_AUTHORITY else request_authority
-    parent = active_request_authority()
-    if isinstance(authority, RequestAuthority) and parent is not None and authority is not parent:
-        authority = parent.intersect(authority)
-    try:
-        operation = ExactOperation.normalize(getattr(block, "tool_type", None), getattr(block, "content", None))
-        valid = isinstance(authority, RequestAuthority) and authority.bound_to(
-            owner=owner, session_id=session_id, workspace=workspace)
-        if valid:
-            authority = authority.restrict(tool_policy, disabled_tools)
-        exact_admission = bool(
-            valid and not authority.inherited and not authority.restricted(operation)
-            and exact_approval is not None and exact_approval.matches(
-                owner=owner, session_id=session_id, workspace=workspace,
-                tool_name=getattr(block, "tool_type", None), content=getattr(block, "content", None)))
-        admitted = valid and (authority.permits(operation) or exact_admission)
-    except (ValueError, TypeError) as error:
-        return f"{getattr(block, 'tool_type', '')}: invalid arguments", {
-            "error": (f"Tool arguments are not valid JSON: {error}"
-                      if isinstance(error, json.JSONDecodeError) else str(error)),
+    admission = classify_request_admission(
+        block,
+        owner=owner, session_id=session_id, workspace=workspace,
+        tool_policy=tool_policy, disabled_tools=disabled_tools,
+        request_authority=request_authority, exact_approval=exact_approval,
+    )
+    if admission.status != "admitted":
+        return (
+            f"{getattr(block, 'tool_type', '')}: "
+            + ("invalid arguments" if admission.invalid_arguments else "BLOCKED")
+        ), {
+            "error": admission.reason,
             "exit_code": 1, "blocked": True,
-            "failure_kind": "request_authority_denied",
+            "failure_kind": (
+                "request_authority_denied"
+                if admission.status == "denied"
+                else "request_authority_ungranted"
+            ),
         }
-    if not admitted:
-        reason = "The exact operation is outside server request authority."
-        if tool_policy and any(tool_policy.blocks(name) for name in email_tool_policy_names(getattr(block, "tool_type", ""))):
-            reason = f"Execution of tool '{getattr(block, 'tool_type', '')}' is forbade by the active tool policy."
-        elif isinstance(authority, RequestAuthority) and authority.restricted(operation):
-            reason = "The exact operation is disabled by user or server request authority policy."
-        return f"{getattr(block, 'tool_type', '')}: BLOCKED", {
-            "error": reason,
-            "exit_code": 1, "blocked": True, "failure_kind": "request_authority_denied",
-        }
+    operation = admission.operation
+    authority = admission.authority
+    exact_admission = admission.exact_admission
 
     from src.turn_contract import active_turn_contract
     contract = active_turn_contract()
@@ -1820,10 +1896,24 @@ async def execute_tool_block(
 
     approval_claimed = False
     if exact_approval is not None:
+        # External-context proposals stay bound to an armed run: the card only
+        # exists because untrusted content reached the model, so claiming it
+        # inside a run that never saw that context would bypass the gate it
+        # guards. A request_authority proposal exists precisely because the
+        # run's own grants did not cover the action; the run that consumed it
+        # re-binds the sealed authority, so no armed external-context state is
+        # required to claim it.
+        _authority_proposal = (
+            getattr(exact_approval.pending, "proposal_kind", "external_context")
+            == "request_authority"
+        )
         if (
-            not isinstance(security_context, ToolRunSecurityContext)
-            or not security_context.external_untrusted_context_seen
-            or not exact_approval.pending.external_untrusted_context_seen
+            not _authority_proposal
+            and (
+                not isinstance(security_context, ToolRunSecurityContext)
+                or not security_context.external_untrusted_context_seen
+                or not exact_approval.pending.external_untrusted_context_seen
+            )
         ):
             return (
                 f"{getattr(block, 'tool_type', None)}: BLOCKED",

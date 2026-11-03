@@ -274,22 +274,28 @@ class AuthManager:
         if username in RESERVED_USERNAMES:
             logger.warning("Refused to create reserved username '%s'", username)
             return False
-        if username in self.users:
-            return False
-        if "users" not in self._config:
-            self._config["users"] = {}
+        # Hash outside the lock: bcrypt is slow enough that holding
+        # _config_lock across it would serialize unrelated account writes.
         if passwordless or password is None:
             password_hash = None
         else:
             password_hash = _hash_password(password)
-        self._config["users"][username] = {
-            "password_hash": password_hash,
-            "created": time.time(),
-            "is_admin": is_admin,
-            "privileges": dict(ADMIN_PRIVILEGES if is_admin else DEFAULT_PRIVILEGES),
-            "passwordless": bool(passwordless or password is None),
-        }
-        self._save()
+        # The existence check and the insert must happen under the same lock
+        # acquisition, or concurrent creates of the same username all pass the
+        # check and each write a row (the duplicate-registration race).
+        with self._config_lock:
+            if username in self.users:
+                return False
+            if "users" not in self._config:
+                self._config["users"] = {}
+            self._config["users"][username] = {
+                "password_hash": password_hash,
+                "created": time.time(),
+                "is_admin": is_admin,
+                "privileges": dict(ADMIN_PRIVILEGES if is_admin else DEFAULT_PRIVILEGES),
+                "passwordless": bool(passwordless or password is None),
+            }
+            self._save()
         logger.info(f"Created user '{username}' (admin={is_admin})")
         return True
 

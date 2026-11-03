@@ -102,7 +102,8 @@ async def test_bg_marker_refuses_without_spawning_and_authority_still_gates(jobs
         block, session_id="chat", owner="alice", workspace=str(path),
         security_context=NO_TOOL_SECURITY_CONTEXT, request_authority=None,
     )
-    assert denied["failure_kind"] == "request_authority_denied"
+    # No authority was bound at all: ungranted, not explicitly denied.
+    assert denied["failure_kind"] == "request_authority_ungranted"
 
 
 def test_detached_supervisor_enforces_timeout(jobs):

@@ -454,12 +454,17 @@ function initAuthentikSettings() {
   }
 
   async function save(payload) {
-    await fetch('/api/auth/settings', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    try {
+      await fetch('/api/auth/settings', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } finally {
+      // Drop the shared snapshot: it still says what these toggles used to be.
+      invalidateSettings();
+    }
     await load();
   }
 
