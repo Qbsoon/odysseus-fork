@@ -1042,6 +1042,14 @@ async def build_chat_context(
     """
     _prep_t0 = time.monotonic()
     prep_timings: dict = {}
+    # If a post-response compaction prewarm is still running for this session,
+    # let it finish first: it may rewrite the session history this build is
+    # about to snapshot, and its LLM call is work we would otherwise repeat.
+    try:
+        from src.turn_prewarm import wait_for_compaction
+        await wait_for_compaction(session_id)
+    except Exception:
+        logger.debug("compaction prewarm wait skipped", exc_info=True)
     # Preset
     preset = extract_preset(chat_handler, preset_id)
 

@@ -1239,6 +1239,13 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    # Capture the app's event loop so sync routes (FastAPI threadpool, no
+    # running loop) can schedule turn prewarming via run_coroutine_threadsafe.
+    try:
+        from src import turn_prewarm
+        turn_prewarm.set_main_loop(asyncio.get_running_loop())
+    except Exception as _e:
+        logger.warning("Turn prewarm loop capture failed (non-critical): %s", _e)
     # MCP servers can be slow or blocked by local tooling. Connect them after
     # the web server is accepting traffic instead of delaying the whole UI.
     async def _startup_mcp_connections():

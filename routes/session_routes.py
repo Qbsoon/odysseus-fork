@@ -656,7 +656,7 @@ def setup_session_routes(
             from src.turn_prewarm import schedule_session_prewarm
             schedule_session_prewarm(session, user)
         except Exception:
-            pass
+            logger.debug("session-creation prewarm scheduling failed", exc_info=True)
         return SessionResponse(
             id=sid,
             name=session.name,
@@ -775,7 +775,7 @@ def setup_session_routes(
                 from src.turn_prewarm import schedule_session_prewarm
                 schedule_session_prewarm(session, user)
             except Exception:
-                pass
+                logger.debug("model-switch prewarm scheduling failed", exc_info=True)
         return result
     
     @router.post("/session/{sid}/inject_messages")

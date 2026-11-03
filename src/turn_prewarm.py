@@ -28,20 +28,57 @@ logger = logging.getLogger(__name__)
 # pattern as src/builtin_mcp.py / routes/chat_helpers.py).
 _BG_TASKS: set = set()
 _INFLIGHT: dict = {}
+# The app's main event loop, captured at startup. Sync routes (FastAPI runs
+# `def` routes in a threadpool with NO running loop) schedule prewarm
+# coroutines onto this loop via run_coroutine_threadsafe.
+_MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
+# Sessions whose post-response compaction prewarm is currently running. The
+# next turn's context build awaits it (``wait_for_compaction``) so the send
+# path never snapshots half-compacted history or repeats the LLM call.
+_COMPACT_INFLIGHT: dict = {}
+
+
+def set_main_loop(loop: asyncio.AbstractEventLoop) -> None:
+    """Capture the app's event loop (called once from app startup)."""
+    global _MAIN_LOOP
+    _MAIN_LOOP = loop
 
 
 def turn_prewarm_enabled(environ: Optional[dict] = None) -> bool:
     env = os.environ if environ is None else environ
-    return str(env.get("ODYSSEUS_TURN_PREWARM", "")).strip().lower() not in {
+    return str(env.get("ODYSSEUS_TURN_PREWARM", "").strip().lower()) not in {
         "0", "false", "no", "off",
     }
 
 
-def _spawn_bg(coro) -> asyncio.Task:
-    task = asyncio.create_task(coro)
-    _BG_TASKS.add(task)
-    task.add_done_callback(_BG_TASKS.discard)
-    return task
+def _spawn_bg(coro):
+    """Schedule a fire-and-forget coroutine, with or without a running loop.
+
+    With a running loop (async context): a plain task. Without one (sync
+    route threadpool): handed to the captured app loop via
+    ``run_coroutine_threadsafe`` — a bare ``asyncio.create_task`` there
+    raises RuntimeError, which callers used to swallow, silently turning
+    the session-creation prewarm into a no-op.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None:
+        task = loop.create_task(coro)
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
+        return task
+
+    target = _MAIN_LOOP
+    if target is None or target.is_closed():
+        coro.close()
+        logger.debug("turn prewarm dropped: no event loop available")
+        return None
+    future = asyncio.run_coroutine_threadsafe(coro, target)
+    _BG_TASKS.add(future)
+    future.add_done_callback(_BG_TASKS.discard)
+    return future
 
 
 def schedule_session_prewarm(sess, owner: Optional[str] = None) -> None:
@@ -136,10 +173,13 @@ async def prewarm_compaction(sess, owner: Optional[str] = None) -> None:
 
     The next turn's ``maybe_compact`` then sees an already-compacted (or
     confirmed-under-threshold) history and no-ops, so the send path never
-    waits for the compaction LLM call.
+    waits for the compaction LLM call. Registered in ``_COMPACT_INFLIGHT``
+    so a send that starts mid-compaction awaits it
+    (``wait_for_compaction``) instead of racing it.
     """
     endpoint = str(getattr(sess, "endpoint_url", "") or "")
     model = str(getattr(sess, "model", "") or "")
+    session_id = str(getattr(sess, "id", "") or "")
     if not endpoint or not model:
         return
     history = None
@@ -155,11 +195,37 @@ async def prewarm_compaction(sess, owner: Optional[str] = None) -> None:
         return
     from src.context_compactor import maybe_compact
 
-    await maybe_compact(
-        sess,
-        endpoint,
-        model,
-        history,
-        getattr(sess, "headers", None),
-        owner=owner,
-    )
+    fut: Optional[asyncio.Future] = None
+    if session_id:
+        try:
+            fut = asyncio.get_running_loop().create_future()
+            _COMPACT_INFLIGHT[session_id] = fut
+        except RuntimeError:
+            fut = None
+    try:
+        await maybe_compact(
+            sess,
+            endpoint,
+            model,
+            history,
+            getattr(sess, "headers", None),
+            owner=owner,
+        )
+    finally:
+        if session_id:
+            _COMPACT_INFLIGHT.pop(session_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(None)
+
+
+async def wait_for_compaction(session_id: str) -> None:
+    """Await an in-flight post-response compaction prewarm for a session.
+
+    Called at the top of ``build_chat_context`` so the context build never
+    snapshots history that the prewarm is about to rewrite, and never
+    repeats a compaction the prewarm is already performing. Returns
+    immediately when nothing is in flight.
+    """
+    fut = _COMPACT_INFLIGHT.get(str(session_id or ""))
+    if fut is not None:
+        await fut
