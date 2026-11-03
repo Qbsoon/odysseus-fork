@@ -270,6 +270,13 @@ class ChatProcessor:
         """
         preface = []
         rag_sources = []
+        # Per-stage wall-clock timings for the chat pre-flight attribution
+        # (Task 2 Phase 2A). Read by build_chat_context via
+        # ``_last_preface_timings`` and surfaced as the ``chat_prep`` SSE
+        # event / [chat-prep-timing] log line. Only stages that actually ran
+        # get an entry; an absent key means the stage was skipped.
+        preface_timings: Dict[str, float] = {}
+        self._last_preface_timings = preface_timings
 
         # Add preset system prompt if specified
         if preset_system_prompt:
@@ -296,6 +303,7 @@ class ChatProcessor:
         # Memory: all pinned facts (always) + relevant unpinned recall.
         self._last_used_memories = []  # track what was injected
         if use_memory:
+            _stage_t = time.monotonic()
             mem_entries = self.memory_manager.load(owner=owner)
 
             pinned = [m for m in mem_entries if m.get("pinned")]
@@ -346,12 +354,14 @@ class ChatProcessor:
                     self.memory_manager.increment_uses(_used_ids)
                 except Exception as _e:
                     logger.warning("Failed to increment memory uses: %s", _e)
+            preface_timings["memory"] = round(time.monotonic() - _stage_t, 4)
 
             # (skills index injection moved out — see below; only fires in
             # agent mode so chat mode and incognito stay clean.)
 
         # RAG: search if enabled and rag_manager available, inject only above threshold
         if use_rag:
+            _stage_t = time.monotonic()
             try:
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
                 if rag_manager:
@@ -379,10 +389,12 @@ class ChatProcessor:
                         ))
             except Exception as e:
                 logger.warning(f"RAG retrieval failed: {e}")
+            preface_timings["rag"] = round(time.monotonic() - _stage_t, 4)
 
         # Add web search if enabled
         web_sources = []
         if use_web:
+            _stage_t = time.monotonic()
             try:
                 from src.llm_core import llm_call
 
@@ -443,6 +455,7 @@ class ChatProcessor:
             except Exception as e:
                 logger.error(f"Web search failed: {e}")
                 preface.append({"role": "system", "content": "Web search encountered an error and could not retrieve results."})
+            preface_timings["web_search"] = round(time.monotonic() - _stage_t, 4)
 
         # Process non-YouTube URLs in message (YouTube handled by preprocess_message)
         # Skip auto-fetch for long pastes (the user already pasted the content —
@@ -453,7 +466,8 @@ class ChatProcessor:
         urls = extract_urls(message)
         non_yt_urls = [u for u in urls if not is_youtube_url(u)]
         skip_url_fetch = len(message) > 2000 or len(non_yt_urls) > 3
-        if not skip_url_fetch:
+        if non_yt_urls and not skip_url_fetch:
+            _stage_t = time.monotonic()
             for url in non_yt_urls:
                 try:
                     result = fetch_webpage_content(url)
@@ -499,6 +513,7 @@ class ChatProcessor:
                         "web page fetch failure",
                         f"A linked page was not read: {status}.",
                     ))
+            preface_timings["url_fetch"] = round(time.monotonic() - _stage_t, 4)
 
         # Skills index — progressive disclosure. Only injected when the
         # model has the `manage_skills` tool available (agent_mode), and
@@ -506,6 +521,7 @@ class ChatProcessor:
         # context retention this turn). In plain chat mode the model can't
         # call the tool anyway, so the index would be noise.
         if agent_mode and not incognito and use_skills and self.skills_manager:
+            _stage_t = time.monotonic()
             try:
                 idx = self.skills_manager.index_for(owner=owner)
             except Exception as e:
@@ -525,5 +541,6 @@ class ChatProcessor:
                     "available skills index",
                     "\n".join(lines),
                 ))
+            preface_timings["skills"] = round(time.monotonic() - _stage_t, 4)
 
         return preface, rag_sources, web_sources

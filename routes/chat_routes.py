@@ -3846,6 +3846,12 @@ def setup_chat_routes(
             if not tool_approval_continuation:
                 yield f"data: {json.dumps({'type': 'turn_mode', 'mode': _effective_mode, 'auto_escalated': auto_escalated})}\n\n"
 
+            # Pre-flight stage timings (memory/RAG/skills/web preprocessing —
+            # Task 2 Phase 2A). Emitted before any model output so the client
+            # can attribute time-to-first-token to the context build.
+            if ctx.prep_timings:
+                yield f"data: {json.dumps({'type': 'chat_prep', 'data': ctx.prep_timings})}\n\n"
+
             # The client sent a workspace the server refused to bind (deleted
             # folder, file path, sensitive dir, filesystem root). Tell it up
             # front so the UI can clear the pill instead of displaying a

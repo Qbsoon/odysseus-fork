@@ -207,6 +207,36 @@ def _call_timeout(read_timeout) -> httpx.Timeout:
     return httpx.Timeout(connect=LLMConfig.CONNECT_TIMEOUT, read=float(read_timeout), write=10.0, pool=5.0)
 
 
+def _classify_first_stream_frame(frame: Dict) -> str:
+    """Classify the first meaningful SSE frame for TTFT attribution.
+
+    Priority mirrors generation order: an upstream error frame, then thinking
+    (reasoning deltas), then native tool calls, then plain content. Frames that
+    carry several kinds at once are labeled by the highest-priority kind; the
+    full delta key list is logged alongside so ambiguity stays visible.
+    """
+    if frame.get("error"):
+        return "error"
+    for choice in frame.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta") or {}
+        if not isinstance(delta, dict):
+            continue
+        if any(delta.get(key) for key in ("reasoning_content", "reasoning", "thinking")):
+            return "thinking"
+        if delta.get("tool_calls"):
+            return "tool_calls"
+        content = delta.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                return "content"
+        elif content:
+            # Non-string content blocks (vision/multimodal deltas).
+            return "content"
+    return "other"
+
+
 def _stream_timeout(read_timeout) -> httpx.Timeout:
     """Per-request timeout for streaming LLM calls (connect from config)."""
     return httpx.Timeout(connect=LLMConfig.CONNECT_TIMEOUT, read=float(read_timeout), write=30.0, pool=5.0)
@@ -3501,6 +3531,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             events.append(_stream_delta_event(part))
         return events
 
+    _ttft_request_start = time.monotonic()
+    _ttft_logged = False
     try:
         client = _get_http_client()
         h = await apply_kimi_code_headers_async(client, h, target_url)
@@ -3512,6 +3544,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly})}\n\n'
                 return
 
+            _ttft_headers_ms = (time.monotonic() - _ttft_request_start) * 1000.0
             first_token_budget = _first_token_timeout(target_url, timeout)
             stream_received_event = False
             first_token_deadline = (
@@ -3618,6 +3651,23 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                         first_choice.get("finish_reason"),
                                     )
                                 if has_meaningful_choice or j.get("error"):
+                                    if not _ttft_logged:
+                                        _ttft_logged = True
+                                        _first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+                                        _first_delta = _first_choice.get("delta") or {}
+                                        logger.info(
+                                            "[llm-ttft] provider=%s model=%s ttfb_ms=%.0f ttft_ms=%.0f first=%s "
+                                            "delta_keys=%s content_chars=%s tool_calls=%s finish=%s",
+                                            provider,
+                                            model,
+                                            _ttft_headers_ms,
+                                            (time.monotonic() - _ttft_request_start) * 1000.0,
+                                            _classify_first_stream_frame(j),
+                                            sorted(_first_delta) if isinstance(_first_delta, dict) else [],
+                                            len(str(_first_delta.get("content") or "")) if isinstance(_first_delta, dict) else 0,
+                                            len(_first_delta.get("tool_calls") or []) if isinstance(_first_delta, dict) else 0,
+                                            _first_choice.get("finish_reason"),
+                                        )
                                     stream_received_event = True
                                 if j.get("error"):
                                     err = j.get("error")
@@ -3880,6 +3930,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _cooled = _mark_host_dead(target_url)
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
         logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
+        logger.warning(
+            "[llm-ttft] provider=%s model=%s failed_before_first_event=connect elapsed_ms=%.0f",
+            provider, model, (time.monotonic() - _ttft_request_start) * 1000.0,
+        )
         yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
     except httpx.ReadTimeout as exc:
         # Some self-hosted OpenAI-compatible servers accept a multimodal
@@ -3916,6 +3970,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 yield retry_chunk
             return
         logger.warning("LLM stream read timeout: %s", exc)
+        if not _ttft_logged:
+            logger.warning(
+                "[llm-ttft] provider=%s model=%s failed_before_first_event=read_timeout elapsed_ms=%.0f",
+                provider, model, (time.monotonic() - _ttft_request_start) * 1000.0,
+            )
         yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
     except httpx.PoolTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Connection pool timeout", "status": 504})}\n\n'
@@ -3927,6 +3986,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         yield f'event: error\ndata: {json.dumps({"error": "Network error", "status": 502, "fallback_eligible": False})}\n\n'
     except Exception as e:
         logger.error(f"Stream error: {e}")
+        if not _ttft_logged:
+            logger.warning(
+                "[llm-ttft] provider=%s model=%s failed_before_first_event=%s elapsed_ms=%.0f",
+                provider, model, type(e).__name__, (time.monotonic() - _ttft_request_start) * 1000.0,
+            )
         yield f'event: error\ndata: {json.dumps({"error": _stream_failure_message(e), "status": 502, "fallback_eligible": False})}\n\n'
 
 

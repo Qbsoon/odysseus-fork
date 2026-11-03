@@ -443,6 +443,12 @@ class ChatContext:
     # retained only when explicit foreground fallbacks are enabled so each
     # concrete candidate can apply its own context budget independently.
     route_messages: list = field(default_factory=list)
+    # Wall-clock stage timings of this context build (Task 2 Phase 2A):
+    # preprocess, history_persist, preface (+ its memory/rag/web_search/
+    # url_fetch/skills sub-stages), compaction, total. Surfaced as the
+    # ``chat_prep`` SSE event and the [chat-prep-timing] log line so a slow
+    # time-to-first-token can be attributed to the pre-flight.
+    prep_timings: dict = field(default_factory=dict)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
@@ -1042,6 +1048,8 @@ async def build_chat_context(
     ``context_resolution`` is the turn's already resolved context window. When
     supplied, history shaping sizes against it instead of probing the endpoint.
     """
+    _prep_t0 = time.monotonic()
+    prep_timings: dict = {}
     # Preset
     preset = extract_preset(chat_handler, preset_id)
 
@@ -1055,11 +1063,13 @@ async def build_chat_context(
         auto_opened_docs=auto_opened_docs,
         allow_tool_preprocessing=allow_tool_preprocessing,
     )
+    prep_timings["preprocess"] = round(time.monotonic() - _prep_t0, 4)
 
     # Add user message to history. Nobody/incognito uses a request-local
     # transcript store instead of session history so stale saved chats cannot
     # bleed into context and the turn is not persisted.
     if persist_user_message and incognito:
+        _persist_t = time.monotonic()
         user_meta = {}
         if preprocessed.attachment_meta:
             user_meta["attachments"] = preprocessed.attachment_meta
@@ -1068,7 +1078,9 @@ async def build_chat_context(
         if auto_escalated:
             user_meta["auto_escalated"] = True
         _append_incognito_message(session_id, "user", preprocessed.user_content, user_meta)
+        prep_timings["history_persist"] = round(time.monotonic() - _persist_t, 4)
     elif persist_user_message:
+        _persist_t = time.monotonic()
         add_user_message(
             sess,
             chat_handler,
@@ -1077,6 +1089,7 @@ async def build_chat_context(
             interaction_mode=interaction_mode,
             auto_escalated=auto_escalated,
         )
+        prep_timings["history_persist"] = round(time.monotonic() - _persist_t, 4)
 
     # Fire events
     if persist_user_message and not incognito:
@@ -1176,7 +1189,16 @@ async def build_chat_context(
     )
     if use_rag is not None or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val
+    _preface_t = time.monotonic()
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
+    prep_timings["preface"] = round(time.monotonic() - _preface_t, 4)
+    # Sub-stage timings recorded by ChatProcessor.build_context_preface
+    # (memory / rag / web_search / url_fetch / skills). A fake processor in
+    # tests may not record them; absence is fine.
+    for _stage, _seconds in (
+        getattr(chat_processor, "_last_preface_timings", None) or {}
+    ).items():
+        prep_timings[_stage] = _seconds
 
     # Capture used memories immediately
     used_memories = getattr(chat_processor, '_last_used_memories', [])
@@ -1262,10 +1284,12 @@ async def build_chat_context(
         )
         was_compacted = False
     else:
+        _compact_t = time.monotonic()
         messages, context_length, was_compacted = await maybe_compact(
             sess, sess.endpoint_url, sess.model, messages, sess.headers, owner=user,
             **prepared_window,
         )
+        prep_timings["compaction"] = round(time.monotonic() - _compact_t, 4)
     _before_trim_messages = len(messages)
     _before_trim_tokens = estimate_tokens(messages)
     if not defer_context_shaping:
@@ -1273,6 +1297,9 @@ async def build_chat_context(
     _after_trim_messages = len(messages)
     _after_trim_tokens = estimate_tokens(messages)
     _context_trimmed = _after_trim_messages < _before_trim_messages or _after_trim_tokens < _before_trim_tokens
+
+    prep_timings["total"] = round(time.monotonic() - _prep_t0, 4)
+    logger.info("[chat-prep-timing] %s", prep_timings)
 
     return ChatContext(
         preface=preface,
@@ -1294,6 +1321,7 @@ async def build_chat_context(
         auto_opened_docs=auto_opened_docs,
         uploaded_files=uploaded_files,
         route_messages=route_messages,
+        prep_timings=prep_timings,
     )
 
 

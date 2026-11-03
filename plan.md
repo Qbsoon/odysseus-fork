@@ -318,23 +318,72 @@ limit it.** No prompt-size measurement, no trimming/clamping proposals.
 
 ## Phase 2A — Diagnosis (no behavior change; live run is user-executed)
 
-- [ ] Add TTFT logging for ALL providers in the generic stream path
+- [x] Add TTFT logging for ALL providers in the generic stream path
       (`src/llm_core.py`): time from request send → first SSE event, split by
       first-thinking vs first-content event, and log any retry/reroute/cooldown
       events on the way to the request. Mirror the existing
       `[llm-first-token-frame]` debug shape so it can run always at INFO, not
       only behind the env flag. (Implementable + unit-tested in this dev
       environment.)
-- [ ] Extend timing coverage to the chat_routes pre-flight: emit one
+      DONE 2026-11-03: `[llm-ttft]` INFO line in `_stream_llm_inner`'s
+      OpenAI-compatible path (the transport OpenCode Go uses): `ttfb_ms`
+      (request sent → response headers), `ttft_ms` (request sent → first
+      *meaningful* frame — role-only/whitespace preambles don't stop the
+      clock), `first=` classification via the new `_classify_first_stream_frame`
+      (error > thinking > tool_calls > content), plus the first frame's
+      delta_keys/content_chars/tool_calls/finish shape. Failure before any
+      first event logs `failed_before_first_event=connect|read_timeout|<exc>`
+      with elapsed ms. Retry/reroute/cooldown events were already logged
+      (`[fallback]` warnings, cooldown 503s) — unchanged. Tests:
+      `tests/test_llm_ttft_logging.py` (INFO without the debug flag,
+      thinking/content/tool_calls classification, preamble not counted,
+      classifier unit cases). NOT yet executed.
+- [x] Extend timing coverage to the chat_routes pre-flight: emit one
       `chat_prep` SSE event (or fold into `agent_prep`) with
       `build_chat_context` stage timings (memory, RAG, skills, web preprocessing).
       (Implementable + unit-tested here.)
-- [ ] Write a short reproduction runbook for the user's live instance:
+      DONE 2026-11-03: `ChatProcessor.build_context_preface` records per-stage
+      timings into `_last_preface_timings` (memory / rag / web_search /
+      url_fetch / skills — executed stages only); `build_chat_context`
+      (`routes/chat_helpers.py`) adds `preprocess`, `history_persist`,
+      `preface`, `compaction`, `total`, merges the sub-stages, attaches them
+      as `ChatContext.prep_timings`, and logs `[chat-prep-timing]` at INFO.
+      `routes/chat_routes.py` `stream_with_save` emits a `chat_prep` SSE event
+      right after `turn_mode` (unknown event types are ignored by the
+      frontend dispatcher, so this is additive). Tests:
+      `tests/test_chat_prep_timing.py` (stage recording, executed-only keys,
+      per-call reset, ctx attachment + merge, log line, static check of the
+      SSE emission). NOT yet executed.
+- [x] Write a short reproduction runbook for the user's live instance:
       set `ODYSSEUS_DEBUG_LLM_SHAPE=1`, send one agent-mode OpenCode Go turn,
       capture the new TTFT/`chat_prep`/`agent_prep` log lines, and run the
       comparison curl (same model, minimal prompt) against
       `https://opencode.ai/zen/go/v1`. One paste of the logs attributes the
       minute to H2/H3/H5 (H4 is a log-line check).
+      DONE 2026-11-03: `docs/TTFT_REPRO_RUNBOOK.md` — signal table, capture
+      steps, comparison curl (with the `x-opencode-session` header), and an
+      observation → hypothesis → Phase 2B fix mapping. Includes the
+      reference-extension findings (below).
+
+### Reference: the fast VS Code path (opencode-copilot-chat)
+
+Checked 2026-11-03 against `ltmoerdani/opencode-copilot-chat`'s provider
+architecture doc (the extension the user's fast VS Code comparison runs
+through):
+
+- GLM (and most models) go over the **same** `/zen/go/v1` chat-completions
+  transport the app uses — transport is not the difference.
+- It sends an explicit per-family **thinking control**: GLM maps to
+  `thinking: {type}` in the payload (Kimi/MiniMax similar; DeepSeek/Mimo map to
+  reasoning effort). The app sends nothing for `opencode-go`
+  (`_apply_hosted_thinking_mode` handles only OpenRouter and Kimi), so GLM-5.3
+  runs with provider-default thinking — this is the concrete H2 fix shape for
+  Phase 2B.
+- It captures `reasoning_content` during streaming and echoes it back on
+  assistant history for GLM (tolerated family; DeepSeek requires it).
+- It bounds request budgets with proportional tokenizer headroom and tracks
+  per-request latency summaries — consistent with the fast path being
+  well-behaved on the same endpoint.
 - [ ] User runs the runbook on the live deployment; analyze the pasted logs
       here and select the Phase 2B fix.
 
@@ -361,8 +410,15 @@ prompt-size instrumentation.
 
 ### Next recommended task for Task 2
 
-Phase 2A — the instrumentation is small, additive, and turns the "usually a
-minute" report into a one-run attribution.
+Phase 2A instrumentation is implemented (2026-11-03). Remaining:
+1. Execute the new tests (`tests/test_llm_ttft_logging.py`,
+   `tests/test_chat_prep_timing.py`) plus the touched-path suites
+   (`tests/test_llm_core_streaming.py`, `tests/test_chat_helpers.py`,
+   `tests/test_kv_cache_invalidation_2927.py`, `tests/test_review_regressions.py`).
+2. User runs `docs/TTFT_REPRO_RUNBOOK.md` on the live deployment and pastes
+   the `[chat-prep-timing]` / `[llm-ttft]` / `[fallback]` lines + comparison
+   curl timing back here; then select the Phase 2B fix (H2 shape is already
+   known from the reference extension: GLM `thinking: {type}` control).
 
 ---
 
