@@ -4378,6 +4378,31 @@ def _filter_raw_browser_mcp_schemas(
     ]
 
 
+def _expand_disabled_email_aliases(disabled_tools: Optional[Set[str]]) -> Set[str]:
+    """Bare email tool disables also cover their mcp__email__ qualified forms.
+
+    The Tools settings tab writes bare names (``send_email``) into the global
+    disabled list, while the request ships qualified schemas
+    (``mcp__email__send_email``). The execution gate already aliases both
+    spellings, but the schema and prose filters are exact-match — so a
+    disabled email tool stayed visible to the model and failed only when
+    called. Expanding the set once, at loop entry, makes every downstream
+    exact-match filter agree with the gate: a disabled email tool disappears
+    from the request entirely.
+    """
+    from src.tool_security import BUILTIN_EMAIL_TOOLS
+
+    disabled = set(disabled_tools or ())
+    for name in list(disabled):
+        if name in BUILTIN_EMAIL_TOOLS:
+            disabled.add(f"mcp__email__{name}")
+        elif name.startswith("mcp__email__"):
+            bare = name[len("mcp__email__"):]
+            if bare in BUILTIN_EMAIL_TOOLS:
+                disabled.add(bare)
+    return disabled
+
+
 def _looks_like_notes_list_request(text: str) -> bool:
     """Whether the user is asking to see existing notes, not create one."""
     t = (text or "").lower()
@@ -14504,8 +14529,10 @@ def _build_system_prompt(
         except Exception:
             logger.debug("active skill toolset expansion skipped", exc_info=True)
 
-    # With RAG tools, cache key includes the selected tools
-    _rt_key = frozenset(relevant_tools) if relevant_tools else None
+    # Prompt cache key. The per-turn tool-RAG selection is deliberately NOT
+    # part of the key (Task 2 Phase 2B): the prose no longer varies with it,
+    # and keying on it forced a rebuild — and a different system message —
+    # every turn the selection changed.
     # Include a signature of the built-in overrides so editing one in the
     # Skills UI takes effect without a restart (busts the prompt cache).
     # Hash the full dict so content edits (not just key add/remove) bust it.
@@ -14514,7 +14541,7 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills)
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, compact, _ov_sig, owner, suppress_local_context, suppress_skills)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -14591,6 +14618,12 @@ def _build_system_prompt(
     _recent_email_context_message = None
     _integ_message = None
     _mcp_desc_message = None
+    # Turn-scoped local-machine guidance. Delivered as a late user-role
+    # message (NOT merged into the system prompt) because it asserts a
+    # per-turn fact ("the user referred to this computer") — folding it into
+    # the system role made the prefix change turn-to-turn and defeated
+    # upstream prompt caches (Task 2 Phase 2B).
+    _local_computer_message = None
     _active_doc_is_email_doc = False
     if active_document:
         set_active_document(active_document.id)
@@ -14898,10 +14931,22 @@ def _build_system_prompt(
         and not suppress_local_context
         and (set(relevant_tools) & _WORKSPACE_AGENT_TOOLS)
     ):
-        agent_prompt += _local_computer_rules()
+        # Per-turn local-machine guidance: keep the selection gate (it
+        # asserts a turn-specific fact), but ship it as a late user-role
+        # message instead of appending to the system prompt so the system
+        # message stays byte-stable across turns.
+        _local_computer_message = {
+            "role": "user",
+            "content": _local_computer_rules().strip(),
+        }
 
-    # When creating email documents, instruct the AI on the format
-    if relevant_tools and not suppress_local_context and (_EMAIL_TOOL_HINTS & set(relevant_tools)):
+    # When creating email documents, instruct the AI on the format.
+    # Availability-gated (email tools not disabled), NOT selection-gated:
+    # this is generic how-to-format guidance, and gating it on the per-turn
+    # RAG selection made the system message vary turn-to-turn (Task 2
+    # Phase 2B). With the loop's email alias expansion, disabling email
+    # tools removes both spellings and therefore this block.
+    if not suppress_local_context and (_EMAIL_TOOL_HINTS - set(disabled_tools or ())):
         if _has_recent_email_tool_context(messages):
             _recent_email_context_message = _minimal_recent_notes_tool_context_message(messages)
         agent_prompt += (
@@ -15090,16 +15135,16 @@ def _build_system_prompt(
         except Exception as _integ_err:
             logger.debug(f"Integration prompt injection skipped: {_integ_err}")
 
-    # MCP tool descriptions — sourced from external servers, must not be in system role.
-    _should_inject_mcp_desc = bool(mcp_mgr) and (
-        relevant_tools is None
-        or any(str(tool or "").startswith("mcp__") for tool in relevant_tools)
-    )
-    if _should_inject_mcp_desc:
+    # MCP tool descriptions — sourced from external servers, must not be in
+    # system role. Deliberately NOT filtered by the per-turn tool selection
+    # and NOT gated on it (user decision 2026-11-03: no per-turn tool
+    # recommendations): every enabled MCP tool is described, matching the
+    # full schema surface, so the catalog never implies the others are
+    # second-class. Stable per session (disabled map + MCP generation).
+    if mcp_mgr:
         try:
             _mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(
                 _effective_mcp_disabled_map,
-                allowed_names=relevant_tools,
             )
             if _mcp_desc:
                 _mcp_desc_message = untrusted_context_message(
@@ -15168,6 +15213,7 @@ def _build_system_prompt(
         _mcp_desc_message,
         _skills_message,
         _datetime_message,
+        _local_computer_message,
     ):
         if injected:
             injected["_agent_injected"] = "context"
@@ -15194,6 +15240,8 @@ def _build_system_prompt(
         last_user_idx += 1
     if _datetime_message:
         merged.insert(last_user_idx, _datetime_message)
+    if _local_computer_message:
+        merged.insert(last_user_idx, _local_computer_message)
 
     return merged, mcp_schemas
 
@@ -15219,10 +15267,19 @@ def _build_base_prompt(
     suppress_skills: bool = False,
     endpoint_url: Optional[str] = None,
 ):
-    """Build the agent prompt with only relevant tools included.
+    """Build the agent system prompt from the full tool inventory.
 
-    If relevant_tools is provided (from RAG retrieval), only those tools
-    are shown with full descriptions. Otherwise falls back to full prompt.
+    Task 2 Phase 2B (decided 2026-11-03): the prompt is NO LONGER tailored to
+    the per-turn tool-RAG selection. The schema surface already ships every
+    non-disabled tool each turn; tailoring the prose made the system message
+    — and with it the provider-visible request prefix — change on every turn,
+    defeating upstream prompt caches (measured ~21s prefill per turn on
+    OpenCode Go) and signaling that unselected tools were second-class.
+    ``relevant_tools`` is still accepted (callers pass it, and the active-
+    skill expansion in ``_build_system_prompt`` mutates the caller's set for
+    routing), but it does not shape this prose. Output is a pure function of
+    (disabled_tools, needs_admin, compact) so the prefix is byte-stable
+    across turns.
     """
     from src.tool_index import ALWAYS_AVAILABLE
 
@@ -15230,32 +15287,19 @@ def _build_base_prompt(
     if not get_setting("image_gen_enabled", False):
         disabled.add("generate_image")
 
-    if relevant_tools is not None:
-        # RAG mode: trust the relevant_tools set as already-composed.
-        # get_tools_for_query starts from ALWAYS_AVAILABLE and may
-        # *discard* tools that conflict with the query's intent (e.g.
-        # drop manage_memory for clear contact-save patterns). Unioning
-        # ALWAYS_AVAILABLE back in here used to silently undo those
-        # drops. Only force-include the irreducible loop primitives
-        # (ask_user, update_plan) as belt-and-suspenders.
-        tool_names = set(relevant_tools) | {"ask_user", "update_plan"}
-        if needs_admin:
-            tool_names |= _ADMIN_TOOLS
-        agent_prompt = _assemble_prompt(tool_names, disabled, compact=compact)
-    else:
-        # Fallback: full prompt (RAG unavailable)
-        agent_prompt = AGENT_SYSTEM_PROMPT
-        if not needs_admin:
-            # At least strip the management section
-            mgmt_tools = set(TOOL_SECTIONS.keys()) - set(ALWAYS_AVAILABLE) - {
-                "generate_image", "suggest_document",
-                "chat_with_model", "ask_teacher", "list_models",
-            }
-            agent_prompt = _assemble_prompt(
-                set(TOOL_SECTIONS.keys()) - mgmt_tools, disabled, compact=compact
-            )
-        elif compact:
-            agent_prompt = _assemble_prompt(set(TOOL_SECTIONS.keys()), disabled, compact=True)
+    # Full inventory for every caller (RAG-selected or not). Non-admin turns
+    # keep the historical management-section strip. Compose fresh instead of
+    # returning the precomputed AGENT_SYSTEM_PROMPT so disabled tools are
+    # filtered from the prose for admin turns too (the precomputed constant
+    # ignored ``disabled``).
+    tool_names = set(TOOL_SECTIONS.keys())
+    if not needs_admin:
+        mgmt_tools = tool_names - set(ALWAYS_AVAILABLE) - {
+            "generate_image", "suggest_document",
+            "chat_with_model", "ask_teacher", "list_models",
+        }
+        tool_names -= mgmt_tools
+    agent_prompt = _assemble_prompt(tool_names, disabled, compact=compact)
 
     # Inject the Level-0 skill index — one line per skill so the agent
     # knows what canonical procedures exist. Includes published skills
@@ -21088,6 +21132,11 @@ async def stream_agent_loop(
 
     # Caller and credential denials remain absolute across contract routing.
     disabled_tools = set(disabled_tools or ())
+    # Bare email disables (what the Tools settings tab writes) must also cover
+    # the qualified mcp__email__ schemas — expanded once here so every
+    # downstream exact-match filter (schema surface, prompt prose) agrees
+    # with the execution gate's bare↔qualified aliasing.
+    disabled_tools = _expand_disabled_email_aliases(disabled_tools)
     if delegated_credential:
         disabled_tools.update(delegated_credential_blocked_tools())
         if tool_policy is not None:
@@ -22438,7 +22487,28 @@ async def stream_agent_loop(
             # Non-English queries are flagged low_signal by the English-only
             # intent classifier, but fastembed retrieval works across languages.
             logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
-    if not guide_only and not _relevant_tools:
+    # Full-surface turns (the common hosted shape) ship every non-disabled
+    # tool schema, so the per-turn similarity retrieval cannot restrict the
+    # model's surface — after the catalog change below it feeds only routing
+    # heuristics that the deterministic keyword fallback serves equally.
+    # Skip the embedding query there: it cost ~0.6s on the send path for no
+    # capability effect (user decision 2026-11-03: no per-turn tool
+    # recommendations). Compact/selected surfaces keep the retrieval.
+    _primary_surface_full = False
+    try:
+        _primary_surface_full = _normalize_model_tool_surface(
+            _configured_model_tool_surface(
+                endpoint_url, model, owner, headers=headers
+            )
+        ) == "full"
+    except Exception:
+        _primary_surface_full = False
+    if _primary_surface_full and not guide_only and not _relevant_tools:
+        logger.info(
+            "[tool-rag] full tool surface: skipping similarity retrieval "
+            "(keyword fallback only)"
+        )
+    if not guide_only and not _relevant_tools and not _primary_surface_full:
         try:
             from src.tool_index import get_tool_index, ALWAYS_AVAILABLE
             try:

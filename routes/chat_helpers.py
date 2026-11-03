@@ -114,14 +114,6 @@ _CASUAL_BLOCKLIST_RE = re.compile(
     r"file|folder|repo|git|settings?|endpoint|api|token|mcp)\b",
     re.IGNORECASE,
 )
-_PERSONAL_TOOL_CONTEXT_RE = re.compile(
-    r"\b(?:"
-    r"email|emails|mail|inbox|gmail|"
-    r"calendar|events?|meetings?|appointments?|schedule|"
-    r"notes?|todo|checklist|reminders?|tasks?"
-    r")\b",
-    re.IGNORECASE,
-)
 
 
 def _is_casual_low_signal(text: str) -> bool:
@@ -1154,11 +1146,18 @@ async def build_chat_context(
     # search. Personal app requests should be served by their tools; pre-search
     # here caused calendar/email turns with use_web="false" to run irrelevant
     # web searches before the agent even saw the tool surface.
+    #
+    # Agent turns skip the pre-flight web search entirely (Task 2 Phase 2B,
+    # H3): the measured cost was ~32s blocking time-to-first-token (query-gen
+    # LLM call + SearXNG + serial page fetches all run BEFORE the stream
+    # starts), and the agent already carries web_search/web_fetch tools — it
+    # performs the same search in-stream, where it does not delay the first
+    # token. Plain chat mode keeps the pre-search (no tools there).
     skip_web = (
         bool(search_context)
         or not allow_tool_preprocessing
         or casual_low_signal
-        or bool(agent_mode and _PERSONAL_TOOL_CONTEXT_RE.search(context_message or ""))
+        or bool(agent_mode)
     )
 
     # Build context preface
@@ -1841,6 +1840,18 @@ def run_post_response_tasks(
                 agent_rounds, agent_tool_calls,
                 owner=owner,
             )))
+
+    # Turn prewarm (prepare the next send while the user reads the answer):
+    # run the compaction check on the post-response history. Over the
+    # threshold, the LLM summarization happens now instead of blocking the
+    # next send. It joins the SAME sequential queue as the extraction jobs
+    # so it never competes with the next turn's request (#2927).
+    if not incognito and not compare_mode:
+        try:
+            from src.turn_prewarm import prewarm_compaction
+            _extraction_jobs.append(("compaction-prewarm", prewarm_compaction(sess, owner)))
+        except Exception:
+            logger.debug("compaction prewarm scheduling skipped", exc_info=True)
 
     if _extraction_jobs:
         _spawn_bg(_run_extraction_jobs_sequentially(session_id, _extraction_jobs))

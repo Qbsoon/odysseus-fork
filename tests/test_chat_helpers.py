@@ -776,3 +776,31 @@ async def test_build_chat_context_skips_pre_web_for_agent_notes_turn(monkeypatch
     )
 
     assert captured["use_web"] is False
+
+
+@pytest.mark.asyncio
+async def test_build_chat_context_skips_pre_web_for_every_agent_turn(monkeypatch):
+    # Task 2 Phase 2B (H3): the pre-flight web search blocked the agent stream's
+    # first token by the full search duration (~32s measured). Agent turns have
+    # web_search/web_fetch tools and search in-stream instead.
+    captured = await _build_context_web_probe(
+        monkeypatch,
+        message="latest apple news",
+        use_web="true",
+        agent_mode=True,
+    )
+
+    assert captured["use_web"] is False
+
+
+@pytest.mark.asyncio
+async def test_build_chat_context_keeps_pre_web_for_plain_chat(monkeypatch):
+    # Chat mode has no tools; the pre-search is still the only grounding path.
+    captured = await _build_context_web_probe(
+        monkeypatch,
+        message="latest apple news",
+        use_web="true",
+        agent_mode=False,
+    )
+
+    assert captured["use_web"] is True
