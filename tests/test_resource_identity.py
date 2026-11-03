@@ -278,7 +278,7 @@ async def test_explicit_private_root_requires_owner_and_operation(tmp_path):
     _, result = await dispatch(grant, "read_file", "a")
     assert result["output"] == "owned"
     _, result = await dispatch(grant, "write_file", "b\nx")
-    assert result["failure_kind"] == "request_authority_denied"
+    assert result["failure_kind"] == "request_authority_ungranted"
     assert not (tmp_path / "b").exists()
 
 
@@ -646,7 +646,7 @@ async def test_exact_user_approval_binds_only_one_missing_destination(tmp_path):
     assert (tmp_path / "new/file.txt").read_text() == "approved"
     assert grant.grants == () and grant.resource_roots == ()
     _, next_action = await dispatch(grant, "write_file", "other.txt\nunapproved")
-    assert next_action["failure_kind"] == "request_authority_denied"
+    assert next_action["failure_kind"] == "request_authority_ungranted"
     assert not (tmp_path / "other.txt").exists()
 
 
@@ -716,7 +716,7 @@ async def test_resource_identity_never_expands_narrow_request_classes(tmp_path, 
     (tmp_path / "a").write_text("a")
     grant = create_request_authority(request_text, owner="alice", session_id="s", workspace=str(tmp_path))
     _, result = await dispatch(grant, denied, "a" if denied == "read_file" else "a\nx")
-    assert result["failure_kind"] == "request_authority_denied"
+    assert result["failure_kind"] == "request_authority_ungranted"
 
 
 def test_nonfilesystem_identities_are_inert_and_distinguish_producers_from_pages():

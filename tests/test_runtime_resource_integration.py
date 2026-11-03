@@ -112,7 +112,7 @@ async def test_exact_launch_first_use_replay_and_empty_scope_restoration(workspa
     _, replay = await dispatch(restored, "bash", "printf exact", approval)
     assert replay["exit_code"] == 1
     _, sibling = await dispatch(restored, "bash", "printf sibling")
-    assert sibling["failure_kind"] == "request_authority_denied"
+    assert sibling["failure_kind"] == "request_authority_ungranted"
 
 
 async def test_exact_job_first_use_replay_and_empty_scope_restoration(workspace, monkeypatch):
@@ -133,7 +133,7 @@ async def test_exact_job_first_use_replay_and_empty_scope_restoration(workspace,
     _, replay = await dispatch(restored, "manage_bg_jobs", content, approval)
     assert replay["exit_code"] == 1
     _, unapproved = await dispatch(restored, "manage_bg_jobs", content)
-    assert unapproved["failure_kind"] == "request_authority_denied"
+    assert unapproved["failure_kind"] == "request_authority_ungranted"
     assert restored.process_resources == restored.job_resources == restored.launch_scopes == ()
 
 
@@ -285,7 +285,7 @@ async def test_job_approval_revalidates_exact_resource_before_claim(workspace, m
 async def test_new_resources_do_not_expand_turn_contract_classes(workspace, request_text):
     admitted = create_request_authority(request_text, owner="alice", session_id="thread", workspace=str(workspace))
     _, denied = await dispatch(admitted, "bash", "pwd")
-    assert denied["failure_kind"] == "request_authority_denied"
+    assert denied["failure_kind"] == "request_authority_ungranted"
 
 
 def test_internal_shell_control_has_no_admin_floor_even_without_auth(monkeypatch):

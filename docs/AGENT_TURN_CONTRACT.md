@@ -34,6 +34,13 @@ their existing execution contract. No model weights or training settings change.
    History and resume honor replacement scope. Single-capability turns retain
    canonical output: an always-synthesize trial caused a live notes loop and was
    reverted. Compound turns cannot terminate after only one capability's result.
+7. Request authority admits only what the user's request implies. An operation
+   that is ungranted but not explicitly denied proposes an approval card
+   instead of failing; the decision either widens the resumed run to the
+   approved tool (action-scoped where the operation is action-classified) or
+   silences that exact operation for the rest of the run. Explicit denials are
+   never liftable by an approval, and surfaces with no one to answer
+   (delegated, unattended, teacher runs) keep the hard denial.
 
 ## Verification
 

