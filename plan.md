@@ -384,8 +384,89 @@ through):
 - It bounds request budgets with proportional tokenizer headroom and tracks
   per-request latency summaries — consistent with the fast path being
   well-behaved on the same endpoint.
-- [ ] User runs the runbook on the live deployment; analyze the pasted logs
+- [x] User runs the runbook on the live deployment; analyze the pasted logs
       here and select the Phase 2B fix.
+      DONE 2026-11-03 (user pasted `test.log`, one agent-mode GLM-5.3-flash
+      turn, ~54s to first token). Attribution:
+      - **H3 CONFIRMED, dominant app-side cost: pre-flight web search = 31.9s**
+        (`[chat-prep-timing] web_search=31.89 total=32.07`; client perf
+        `chat_stream_headers=32831ms`). Breakdown from the log: query-gen
+        non-streaming LLM call ~6.7s + SearXNG ~12.2s + 3 serial page fetches
+        ~12.7s — all BEFORE the stream starts.
+      - **Provider TTFB: 21.2s** on the actual agent round-1 request
+        (`[llm-ttft] ttfb_ms=21248 ttft_ms=21250 first=thinking`).
+        Prompt was 11.4k tokens with 96 tool schemas; no fallback/retry/
+        cooldown lines → H5 ruled out. Provider-side (prefill/queue at Go);
+        per the standing user decision, no prompt-size work. The comparison
+        curl (minimal prompt) would confirm whether the 21s scales with
+        prompt size or is flat Go queueing.
+      - **H2 ruled out**: `ttft_ms ≈ ttfb_ms` and `first=thinking` — thinking
+        streamed immediately once headers landed; no render/buffer delay.
+      - H4: no repeated probes (`agent_prep` prep=0.78s total).
+
+      Follow-up (user: the same model answers in ~5s in VS Code via
+      opencode-copilot-chat): the 21.2s is NOT flat Go queueing — it is
+      **prefill of our prompt**, and it recurs every turn because our
+      serialized prefix is not byte-stable:
+      - Size: 11,429 tokens + 96 tool schemas vs the plugin's few-KB Copilot
+        chat prompt. 21s ≈ 11.4k tokens at Go's prefill rate; 5s ≈ ~2–3k
+        tokens at the same rate. Prefill is proportional; no queueing anomaly.
+      - **Prefix instability (app-side, fixable without trimming):**
+        `_build_base_prompt` (`src/agent_loop.py`) builds the SYSTEM prompt
+        from the per-turn tool-RAG selection (`relevant_tools` →
+        `_assemble_prompt(tool_names, ...)`), and `_build_system_prompt`'s
+        cache key includes `frozenset(relevant_tools)` — the system text
+        changes turn-to-turn (log: `[tool-rag] Retrieved tools for query:
+        [...]`). The system message sits first in the serialized prompt, so
+        Go's prefix KV cache misses every turn and the full 11.4k prefill is
+        paid every turn. The 96 tool schemas ARE stable and the
+        memory/RAG/skills blocks are already late user-role messages (#2927
+        work) — only the system prompt varies.
+      - Verification: minimal-prompt curl (~5s expected) + replay the app's
+        exact payload twice byte-identical (2nd should be much faster if Go
+        caches prefixes).
+      - Fix options (Phase 2B, H2/prefill branch — NOT prompt trimming):
+        (A) freeze the tool-RAG tailoring — full stable tool-section prompt
+        (or per-session frozen selection) so the prefix is byte-stable and
+        Go's cache hits; slightly larger system prompt, prefill paid once per
+        session instead of per turn. (B) keep per-turn tailoring but move the
+        relevant-tools note out of the system role into a late untrusted
+        user-role message (same pattern as the skill index), keeping the
+        system prefix static. DECIDED 2026-11-03: **Option A** (user: "no
+        tailoring of that prompt").
+      DONE 2026-11-03 (user approved "Both"):
+      - `_build_base_prompt` (`src/agent_loop.py`) no longer composes from the
+        per-turn `relevant_tools` selection — every caller gets the full
+        tool-inventory prose (non-admin keeps the historical management-
+        section strip; `compact` handled inside `_assemble_prompt`). Output is
+        a pure function of (disabled_tools, needs_admin, compact) → prefix
+        byte-stable across turns. Also fixed while unifying: the admin
+        fallback used to return the precomputed `AGENT_SYSTEM_PROMPT`, which
+        IGNORED `disabled` — disabled tools' sections shipped in the prose
+        for admin turns; composition is now fresh and filters them.
+      - `_build_system_prompt` cache key drops `frozenset(relevant_tools)`;
+        `relevant_tools` keeps its routing/schema-selection roles.
+      - Tests: `tests/test_full_inventory_prompt.py` — prose identical across
+        different RAG selections (admin + non-admin), disabled filtering
+        (incl. the admin fix), cache-key independence, and the email alias
+        expansion below. First run 2026-11-03: 410/411 — the cache-key test
+        caught TWO more per-turn system-message variations in
+        `_build_system_prompt`, both fixed:
+        (a) the EMAIL DOCUMENT FORMAT block was gated on
+        `relevant_tools ∩ _EMAIL_TOOL_HINTS` → now availability-gated
+        (`_EMAIL_TOOL_HINTS - disabled`; generic how-to-format guidance, so
+        stable gating is semantically right; disabling all email-capable
+        tools removes it);
+        (b) `_local_computer_rules()` was appended to the system prompt when
+        the selection contained workspace tools → it asserts a per-turn fact
+        ("the user referred to this computer"), so it KEEPS its selection
+        gate but now ships as a late user-role message
+        (`_local_computer_message`, inserted before the last user message
+        like the datetime message) instead of mutating the system role.
+        Two new tests cover both. Re-run pending. Known remaining
+        occasional system-message variation (out of scope, fires only on
+        specific contextual followup turns): `_prepend_agent_directive`
+        callers and the native artifact/media workspace rules.
 
 ## Phase 2B — Fixes, selected by the Phase 2A finding
 
@@ -397,8 +478,20 @@ prompt-size instrumentation.
       `_apply_hosted_thinking_mode` (send the provider's disable/enable thinking
       parameter per the user's toggle), and/or make the frontend render
       `thinking=True` deltas immediately so TTFT is visibly sub-second.
-- [ ] **If H3 (pre-flight):** fix or parallelize the slow stage surfaced by the
+- [x] **If H3 (pre-flight):** fix or parallelize the slow stage surfaced by the
       `chat_prep` timings.
+      DONE 2026-11-03: agent-mode turns now skip the pre-flight web search
+      entirely (`skip_web` includes `bool(agent_mode)` in
+      `routes/chat_helpers.py`; the personal-tool regex special case is
+      subsumed and removed). Rationale: the agent already carries
+      `web_search`/`web_fetch` tools and searches in-stream, where the search
+      does not delay the first token; plain chat mode (no tools) keeps the
+      pre-search. Expected effect on the measured turn: ~54s → ~21s TTFT
+      (the remaining 21.2s is provider TTFB, app-side unfixable without the
+      ruled-out prompt-size work). Tests:
+      `tests/test_chat_helpers.py::test_build_chat_context_skips_pre_web_for_every_agent_turn`
+      and `..._keeps_pre_web_for_plain_chat`; the two existing agent
+      calendar/notes skip tests still pass.
 - [ ] **If H5 (retry/reroute chain):** eliminate the wasted pre-Go attempt —
       route straight to the session's configured endpoint, or cut the
       retry/cooldown stacking the timeline exposes.
@@ -415,10 +508,127 @@ Phase 2A instrumentation is implemented (2026-11-03). Remaining:
    `tests/test_chat_prep_timing.py`) plus the touched-path suites
    (`tests/test_llm_core_streaming.py`, `tests/test_chat_helpers.py`,
    `tests/test_kv_cache_invalidation_2927.py`, `tests/test_review_regressions.py`).
+   DONE 2026-11-03: user ran them — 119/121 passed; the 2 failures were the
+   `url_fetch` timing recording an empty fetch loop as an executed stage
+   (fixed: `url_fetch` only records when the message contains non-YouTube
+   URLs); re-run of `tests/test_chat_prep_timing.py` pending confirmation.
 2. User runs `docs/TTFT_REPRO_RUNBOOK.md` on the live deployment and pastes
    the `[chat-prep-timing]` / `[llm-ttft]` / `[fallback]` lines + comparison
    curl timing back here; then select the Phase 2B fix (H2 shape is already
    known from the reference extension: GLM `thinking: {type}` control).
+   DONE 2026-11-03: user pasted `test.log` — H3 confirmed and fixed (agent
+   turns skip the pre-flight web search), H2/H5 ruled out, remaining 21.2s
+   is prefill of a per-turn-varying prefix (see the follow-up note above;
+   fix decided as Option A, deferred).
+3. Implement Option A (prefix-stability / tailoring removal) when the user
+   is ready — see the Phase 2B notes above.
+
+### Side finding (2026-11-03, corrected): built-in email MCP tools cannot be disabled from the UI
+
+The user disabled many tools (96 → 42 sent) but the 19 `mcp__email__*`
+   tools still ship; the Integrations tab is empty and the user never added
+   any MCP server. Verified cause chain:
+   1. The email tools come from a **built-in MCP server** — `src/builtin_mcp.py`
+      auto-registers `mcp_servers/email_server.py` ("Built-in: Email") at
+      startup, alongside memory / rag / image_gen / builtin_browser. The user
+      never configured it; it ships with the app.
+   2. The Integrations tab lists only **user-added** servers (DB `McpServer`
+      rows via `/api/mcp/servers`); built-ins have no DB row → they never
+      appear there → the per-tool checkbox panel is unreachable for them.
+   3. The Tools tab toggles write **bare** names (`send_email`) into the
+      global `disabled_tools` setting, but the request ships **qualified**
+      schemas (`mcp__email__send_email`), and the final schema filter in the
+      agent loop (`src/agent_loop.py` ~25150) is an exact-name match — so a
+      bare disable does NOT remove the qualified schema. Execution IS blocked
+      (bare↔qualified aliasing in the gate), so the model sees the tool,
+      calls it, and gets blocked — the worst combination.
+   4. `get_all_openai_schemas` skips built-in Python servers EXCEPT
+      `builtin_browser` and `email` — email is deliberately in the native
+      schema surface ("omitting their schemas makes qualified email calls
+      impossible to select").
+   Practical disable paths today: `ODYSSEUS_DISABLE_MCP=1` (kills ALL MCP —
+   too broad) or manually POSTing qualified names to `/api/tools` (works via
+   exact match, but no UI offers those names).
+   PROPOSED FIX → DONE 2026-11-03 (user approved "Both"):
+   `_expand_disabled_email_aliases` in `src/agent_loop.py` (both directions:
+   bare ↔ `mcp__email__<bare>`), applied once at `stream_agent_loop` entry
+   right after `disabled_tools` normalization, so every downstream
+   exact-match filter (schema surface at the tools composition, prompt prose)
+   agrees with the execution gate's aliasing. A bare email disable in the
+   Tools tab now removes the qualified schema AND the prose section — the
+   tool disappears from the request instead of staying visible-but-blocked.
+   Tests in `tests/test_full_inventory_prompt.py` (both directions, empty
+   inputs, qualified-disable drops the bare prose section, source-level
+   guard that the loop applies the expansion at entry). NOT yet executed.
+   Not done (still optional): surfacing built-in servers in the Integrations
+   list for per-tool control.
+
+---
+
+## Task 2 follow-up (2026-11-03): prewarm the next turn's fixed costs
+
+User request: "make the app prepare anything it can before sending the
+prompt" — at new-chat creation and after each completed response, so the
+send click does as little work as possible.
+
+**What is precomputable (message-independent):** context-window resolution
+for (endpoint, model); the base agent system prompt (byte-stable since the
+full-inventory change — one build fills `_cached_base_prompt` and the next
+send reuses it); the MCP schema surface. **What is NOT:** tool-RAG selection,
+memory recall, preprocess — they need the user's text.
+
+**The big post-response win:** the compaction check. `maybe_compact` runs on
+the send path today and includes an LLM summarization call when the history
+is over the threshold. Running it on the post-response history moves that
+LLM call to while-the-user-reads; the next send's check then no-ops.
+
+- [x] `src/turn_prewarm.py`: `schedule_session_prewarm` (fire-and-forget,
+      single-flight per session, `ODYSSEUS_TURN_PREWARM=0` disables) →
+      `prewarm_session_turn` (context length + `_build_system_prompt` for
+      the common turn shape: global disabled ∪ owner blocks ∪ email aliases,
+      needs_admin=False, mcp_mgr from the manager + MCP schemas); and
+      `prewarm_compaction` (maybe_compact on post-response history).
+- [x] Trigger points wired: session creation + mid-session model switch
+      (`routes/session_routes.py`), post-response compaction pre-check
+      (`routes/chat_helpers.py` `run_post_response_tasks`) — the compaction
+      job joins the SAME sequential extraction queue as memory/skill
+      extraction so it never competes with the next turn (#2927); skipped
+      for incognito/compare turns.
+- [x] Tests: `tests/test_turn_prewarm.py` — base-prompt cache is warm and a
+      real-shaped turn HITS it; compaction pre-check calls maybe_compact
+      with the history; empty history skips; single-flight; env disable;
+      trigger-point wiring. NOT yet executed.
+
+Known residual send-path costs that cannot be prewarmed: tool-RAG chroma
+query (~0.6s, message-dependent), memory recall, preprocess. Also noted:
+`_detect_admin_intent` is message-dependent, so a turn whose text flips
+admin intent builds a different (full vs mgmt-stripped) prompt — occasional
+cache miss by design; if second-turn TTFT still disappoints, making
+needs_admin owner-based instead of intent-based is the next lever.
+
+### Follow-up (2026-11-03): no per-turn tool recommendations — completed
+
+User: "a recommendation was what I said to not do." Final state on
+full-surface turns (the common hosted shape):
+- MCP prose catalog (`_build_system_prompt`) describes EVERY enabled MCP
+  tool — no `allowed_names` filtering, no selection gate. `allowed_names`
+  remains only as a compatibility parameter of
+  `McpManager.get_tool_descriptions_for_prompt` (no production caller).
+- The chroma similarity retrieval is SKIPPED when the primary endpoint's
+  configured tool surface is "full" (`_primary_surface_full` computed via
+  `_configured_model_tool_surface` before the retrieval block) — the
+  selection can no longer restrict anything there, and the deterministic
+  keyword fallback feeds the remaining routing heuristics. Saves the
+  measured ~0.6s `tool_selection` cost. Compact/selected surfaces (local /
+  small models, where the selection IS the surface because the window
+  cannot hold all schemas) keep the retrieval.
+- `_relevant_tools` is now purely a server-side routing hint on full
+  surfaces: nothing model-visible (schemas, system prose, MCP catalog) is
+  derived from it there.
+Tests: `tests/test_full_inventory_prompt.py` —
+`test_mcp_catalog_describes_all_enabled_mcp_tools`,
+`test_full_surface_skips_similarity_retrieval` (loop-level: get_tool_index
+  must not be called). NOT yet executed.
 
 ---
 

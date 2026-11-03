@@ -650,6 +650,13 @@ def setup_session_routes(
         # Fire event for automation tasks
         from src.event_bus import fire_event
         fire_event("session_created", user)
+        # Prewarm the first turn's message-independent inputs (context
+        # window, base agent prompt, MCP schemas) while the user types.
+        try:
+            from src.turn_prewarm import schedule_session_prewarm
+            schedule_session_prewarm(session, user)
+        except Exception:
+            pass
         return SessionResponse(
             id=sid,
             name=session.name,
@@ -762,6 +769,13 @@ def setup_session_routes(
                 db.close()
             result["model"] = model
             result["endpoint_url"] = endpoint_url
+            # New (endpoint, model) pair: prewarm its context window and the
+            # prompt surface while the user types the next message.
+            try:
+                from src.turn_prewarm import schedule_session_prewarm
+                schedule_session_prewarm(session, user)
+            except Exception:
+                pass
         return result
     
     @router.post("/session/{sid}/inject_messages")
