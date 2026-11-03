@@ -25,7 +25,9 @@ def test_compare_submits_approval_only_to_the_pane_session():
     assert "const message = isApproval ? ''" in stream
     assert "if (!isApproval) _appendPaneMessage(hist, 'user', message);" in stream
     assert "json.type === 'tool_approval_resolved'" in stream
-    assert "json.decision === 'deny' ? 'Denied.'" in stream
+    # Task 3: deny is a continuation — the pane keeps the denial note and
+    # subsequent deltas of the resumed run append after it.
+    assert "json.decision === 'deny' ? 'Denied.\\n\\n'" in stream
 
 
 def test_compare_continuation_does_not_lose_or_replace_pane_ownership():

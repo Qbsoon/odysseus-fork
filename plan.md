@@ -774,13 +774,24 @@ already has).
 
 ### Phases
 
-- [ ] **Phase A — Backend deny-continuation:** in `routes/chat_routes.py`, replace
+- [x] **Phase A — Backend deny-continuation:** in `routes/chat_routes.py`, replace
       the deny short-circuit with a continuation that mirrors the approve branch's
       context restoration (workspace, document, `chat_mode = "agent"`,
       `tool_approval_continuation = True`) while skipping every grant restore;
       prepend the fixed denial system message; stream `tool_approval_resolved`
       first, then the resumed loop's events.
-- [ ] **Phase B — Run-denied marker (per-run only):** record the denied
+      DONE 2026-11-04: the deny branch no longer returns
+      `_tool_approval_resolution_stream`; it sets `message =
+      continuation_query`, restores the sealed workspace/document, sets
+      `chat_mode = "agent"` + `_denied_tool_approval`, and falls through the
+      normal flow (no exact admission — `consume` returns None for deny — no
+      bash/web toggle restore). The fixed denial system message (tool name +
+      12-hex content digest, never the sealed content) is inserted at the top
+      of `ctx.messages` (and `route_messages` under foreground policy), and
+      the resumed stream emits `tool_approval_resolved decision=deny` before
+      the loop's events. `continuation_context_message` now also fires for
+      deny continuations.
+- [x] **Phase B — Run-denied marker (per-run only):** record the denied
       (tool, content digest) **in memory, keyed to the run id** — the resumed
       run only. Semantics:
       - "Hard-fail" = the retried tool call returns an error result **to the
@@ -796,11 +807,27 @@ already has).
         an action denied for one prompt may be wanted for the next.
       - Cap repeated proposals of the same operation per run.
       (This is Task 1 Phase 4 — implement once, use for both gates.)
-- [ ] **Phase C — Frontend:** `static/js/chat.js` `tool_approval_resolved` handler:
+      DONE 2026-11-04: the route seeds `run_denied_signatures` (via
+      `_tool_call_signature(tool_name, sealed content)`) into the resumed
+      `stream_agent_loop`. The dispatch-head check (moved from the ungranted
+      branch — a user denial outranks the request text, so a GRANTED
+      operation the user denied is blocked too) returns the error result
+      with `policy: "user_denied"`, run continues, no second card. The
+      marker lives only in the loop invocation — a new prompt starts clean.
+      No proposal counter (per the Task 1 Phase 4 decision: the run pauses
+      at the first card; distinct actions each get their own card).
+- [x] **Phase C — Frontend:** `static/js/chat.js` `tool_approval_resolved` handler:
       mark the card Denied instead of ending the turn; ensure subsequent deltas
       in the same stream get a fresh round holder; same check in
       `static/js/compare/stream.js` (~line 554).
-- [ ] **Phase D — Tests & docs:** deny → run continues and the model receives the
+      DONE 2026-11-04: the handler no longer removes the round/holder (that
+      orphaned subsequent deltas); it hides the interrupted round so the next
+      delta's `_ensureVisibleRoundForDelta` opens a fresh continuation round.
+      The card itself is already marked answered by the click
+      (`_markAskUserAnswered`). Compare pane: unchanged handler already lets
+      subsequent deltas append after the "Denied." note (added a newline
+      separator).
+- [x] **Phase D — Tests & docs:** deny → run continues and the model receives the
       denial message; denied action retried → error result to the model, run
       continues, no second card; **new user prompt resets the marker** (same
       action may be proposed and carded again in the next run);
@@ -808,6 +835,21 @@ already has).
       test; delegated/unattended still never prompt. Update
       `docs/AGENT_TURN_CONTRACT.md` and `THREAT_MODEL.md` (deny is a
       continuation, not a termination; denial text is server-authored).
+      DONE 2026-11-04: loop tests — seeded deny → error result, run
+      continues, no card (existing
+      `test_run_denied_operation_gets_the_error_without_a_card`, still
+      green under the new head placement) + NEW
+      `test_user_denied_operation_is_blocked_even_when_granted` (a user
+      denial outranks the request text). Route wiring asserted in the
+      updated static test (`test_tool_approval_task_scope.py` — deny
+      continuation, seeded signature, denial message, resolved event; the
+      old `_tool_approval_resolution_stream(decision)` assertion replaced —
+      the helper remains for non-chat surfaces). Docs: boundary item 8 in
+      `docs/AGENT_TURN_CONTRACT.md`, deny-continuation paragraph in
+      `THREAT_MODEL.md`. NOT yet executed — run
+      `pytest tests/test_tool_approval_task_scope.py
+      tests/test_request_authority_approval.py tests/test_tool_approvals.py
+      tests/test_external_context_tool_gate.py tests/test_compare_ask_user_routing.py`.
 
 ### Risks
 

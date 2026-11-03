@@ -29,6 +29,7 @@ from src.agent_loop import (
     _configured_model_tool_surface,
     _local_media_needs_browser_render,
     _looks_like_workspace_coding_request,
+    _tool_call_signature,
 )
 from src.agent_loop import _normalize_ody_qwen_text_artifacts
 from src import agent_runs
@@ -2545,6 +2546,10 @@ def setup_chat_routes(
         )
         exact_tool_approval = None
         pending_tool_approval = None
+        # Set only on a deny resolution (Task 3): the denied approval drives
+        # the continuation — denial message, run-denied signature — without
+        # restoring any of the approved action's grants.
+        _denied_tool_approval = None
         retired_tool_approval_taint = False
         external_untrusted_context_seen = False
         tool_approval_continuation = False
@@ -2863,14 +2868,10 @@ def setup_chat_routes(
                         "Tool approval %s was consumed but its persisted card could not be marked resolved",
                         tool_approval_id,
                     )
-                if decision == "deny":
-                    return StreamingResponse(
-                        _tool_approval_resolution_stream(decision),
-                        media_type="text/event-stream",
-                    )
-                # Approval is a control-plane continuation, not a new user turn.
-                # Reuse the sealed interrupted request only for internal context,
-                # retrieval, and policy reconstruction; never persist or display it.
+                # Approval AND denial are control-plane continuations, not new
+                # user turns (Task 3). Reuse the sealed interrupted request only
+                # for internal context, retrieval, and policy reconstruction;
+                # never persist or display it.
                 message = pending_tool_approval.continuation_query
                 # The sealed server record, not mutable composer state,
                 # restores the original action workspace.
@@ -2878,15 +2879,24 @@ def setup_chat_routes(
                 workspace_rejected = None
                 if pending_tool_approval.document_id:
                     active_doc_id = pending_tool_approval.document_id
-                # Restore only the coarse request toggle needed by the exact
-                # sealed action. Current privilege, global-disable, incognito,
-                # compare, and tool-policy gates still run.
-                if pending_tool_approval.tool_name == "bash":
-                    allow_bash = "true"
-                if pending_tool_approval.tool_name in WEB_TOOL_NAMES:
-                    allow_web_search = "true"
-                    _search_enabled = True
-                chat_mode = "agent"
+                if decision == "deny":
+                    # Deny resumes the run WITHOUT the denied action's grants:
+                    # no exact admission, no toggle restore. A fixed
+                    # server-authored denial message tells the model what
+                    # happened, and the denied operation is seeded run-denied
+                    # so a retry gets the hard error without another card.
+                    chat_mode = "agent"
+                    _denied_tool_approval = pending_tool_approval
+                else:
+                    # Restore only the coarse request toggle needed by the exact
+                    # sealed action. Current privilege, global-disable, incognito,
+                    # compare, and tool-policy gates still run.
+                    if pending_tool_approval.tool_name == "bash":
+                        allow_bash = "true"
+                    if pending_tool_approval.tool_name in WEB_TOOL_NAMES:
+                        allow_web_search = "true"
+                        _search_enabled = True
+                    chat_mode = "agent"
             else:
                 # A normal user message supersedes the card that was waiting
                 # in this thread. Retire its opaque grant, but preserve the
@@ -3101,7 +3111,7 @@ def setup_chat_routes(
             defer_context_shaping=foreground_policy.enabled,
             continuation_context_message=(
                 pending_tool_approval.continuation_query
-                if exact_tool_approval
+                if (exact_tool_approval or _denied_tool_approval)
                 and pending_tool_approval
                 and pending_tool_approval.continuation_query
                 else None
@@ -3815,6 +3825,27 @@ def setup_chat_routes(
             do_research and _research_flags["do"] and not research_blocked_by_policy
         )
 
+        if _denied_tool_approval is not None:
+            # Fixed server-authored denial (Task 3): the model must learn the
+            # action was refused and continue without it. Never echo the
+            # sealed content — a short digest only.
+            import hashlib as _hashlib
+            _denial_digest = _hashlib.sha256(
+                str(_denied_tool_approval.content or "").encode("utf-8", errors="replace")
+            ).hexdigest()[:12]
+            _denial_msg = {
+                "role": "system",
+                "content": (
+                    f"The user DENIED the proposed {_denied_tool_approval.tool_name} "
+                    f"action for this run (content digest {_denial_digest}). "
+                    "Do not attempt this exact action again in this run; continue "
+                    "without it or answer from the evidence already collected."
+                ),
+            }
+            ctx.messages.insert(0, _denial_msg)
+            if foreground_policy.enabled:
+                getattr(ctx, "route_messages", ctx.messages).insert(0, dict(_denial_msg))
+
         if chat_mode == "agent":
             runtime_msg = _client_runtime_context_system_message(
                 client_runtime_context,
@@ -3845,6 +3876,10 @@ def setup_chat_routes(
             _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode}
             if not tool_approval_continuation:
                 yield f"data: {json.dumps({'type': 'turn_mode', 'mode': _effective_mode, 'auto_escalated': auto_escalated})}\n\n"
+            elif _denied_tool_approval is not None:
+                # Deny continuation (Task 3): resolve the card in the UI first,
+                # then the same stream continues with the resumed run's events.
+                yield f"data: {json.dumps({'type': 'tool_approval_resolved', 'decision': 'deny'})}\n\n"
 
             # Pre-flight stage timings (memory/RAG/skills/web preprocessing —
             # Task 2 Phase 2A). Emitted before any model output so the client
@@ -4657,6 +4692,16 @@ def setup_chat_routes(
                         external_untrusted_context_seen=external_untrusted_context_seen,
                         delegated_credential=_delegated_credential,
                         exact_approval=exact_tool_approval,
+                        run_denied_signatures=(
+                            frozenset({
+                                _tool_call_signature(
+                                    _denied_tool_approval.tool_name,
+                                    _denied_tool_approval.content,
+                                )
+                            })
+                            if _denied_tool_approval is not None
+                            else None
+                        ),
                         client_runtime_context=client_runtime_context,
                         thinking_mode=thinking_mode,
                         reasoning_effort=reasoning_effort,

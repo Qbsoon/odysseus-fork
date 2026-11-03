@@ -4046,8 +4046,13 @@ import { invalidateSettings } from './appConfig.js';
                 _cancelThinkingTimer();
                 _removeThinkingSpinner();
                 if (spinner && spinner.element) spinner.destroy();
-                if (!_isBg && roundHolder && roundHolder !== holder) roundHolder.remove();
-                if (!_isBg && holder) holder.remove();
+                if (!_isBg) {
+                  // Deny is a continuation now (Task 3): the same stream keeps
+                  // flowing. The card is already marked answered by the click;
+                  // hide the interrupted round so the next delta opens a fresh
+                  // continuation round instead of appending to a removed node.
+                  if (roundHolder) roundHolder.style.display = 'none';
+                }
                 continue;
               }
               if (json.type === 'final_response') {

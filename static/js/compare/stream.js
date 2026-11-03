@@ -556,7 +556,7 @@ async function streamToPane(paneIdx, sessionId, message, aiMsgEl, opts) {
               if (aiMsgEl._spinner.element) aiMsgEl._spinner.destroy();
               aiMsgEl._spinner = null;
             }
-            accumulated = json.decision === 'deny' ? 'Denied.' : 'Approval recorded.';
+            accumulated = json.decision === 'deny' ? 'Denied.\n\n' : 'Approval recorded.\n\n';
             let target = aiMsgEl._textEl;
             if (!target) {
               target = document.createElement('div');

@@ -33328,7 +33328,27 @@ async def stream_agent_loop(
                     disabled_tools=disabled_tools,
                     exact_approval=exact_approval,
                 )
-            if _blocked_user_bounded_execution_retry:
+            if _effective_call_signature in _run_denied_signatures:
+                # Task 3: the user denied this exact operation earlier in this
+                # run. Hard-fail it to the model — run continues, no second
+                # card — regardless of whether the request authority would
+                # have granted it.
+                desc = f"{block.tool_type}: BLOCKED"
+                result = {
+                    "error": (
+                        "This exact operation was denied by the user for this "
+                        "run. Do not retry it; continue without it or answer "
+                        "from the evidence already collected."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "user_denied",
+                }
+                logger.info(
+                    "[agent] user-denied operation blocked without a card: %s",
+                    block.tool_type,
+                )
+            elif _blocked_user_bounded_execution_retry:
                 desc = f"{block.tool_type}: BLOCKED BY USER EXECUTION BOUND"
                 result = {
                     "error": (
@@ -33610,6 +33630,9 @@ async def stream_agent_loop(
                         "policy": "exact_tool_approval_target",
                     }
                 elif _call_signature in _run_denied_signatures:
+                    # Unreachable in practice: the dispatch head blocks any
+                    # run-denied signature before the gates. Kept as
+                    # defense-in-depth for the pre-normalization signature.
                     desc = f"{block.tool_type}: BLOCKED"
                     result = {
                         "error": (
