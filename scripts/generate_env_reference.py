@@ -368,6 +368,14 @@ VARIABLE_NOTES: dict[str, tuple[str, str, str]] = {
         "The same off switch for the in-process email pollers, when "
         "`odysseus-mail poll-scheduled` is the sole external driver.",
     ),
+    "ODYSSEUS_DISABLE_EMAIL_MCP": (
+        "Deployment and first run", USER,
+        "Set to 1, true or yes to never start the built-in email MCP server "
+        "subprocess — no email tools exist anywhere in the app. Narrower than "
+        "ODYSSEUS_DISABLE_MCP, which also removes the memory / rag / image_gen / "
+        "browser built-ins. Combine with ODYSSEUS_INPROCESS_POLLERS=0 to stop the "
+        "email pollers too.",
+    ),
     "ODYSSEUS_STARTUP_WARMUPS": (
         "Deployment and first run", USER,
         "Opt-in startup pings of the configured model endpoints. Off by default "
