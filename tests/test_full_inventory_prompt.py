@@ -245,6 +245,42 @@ def test_mcp_catalog_describes_all_enabled_mcp_tools(monkeypatch):
     assert fake_mcp.seen_allowed_names == [None]
 
 
+def test_cache_key_busts_on_image_gen_setting(monkeypatch):
+    # ``_build_base_prompt`` drops generate_image when image generation is
+    # off; the setting must be part of the cache key or toggling it serves
+    # stale cached prose that disagrees with the schema surface.
+    monkeypatch.setattr(al, "set_active_model", lambda model: None)
+    monkeypatch.setattr(al, "get_builtin_overrides", lambda: {})
+    monkeypatch.setattr(al, "_cached_base_prompt", None)
+    monkeypatch.setattr(al, "_cached_base_prompt_key", None)
+
+    settings = {"image_gen_enabled": False}
+    monkeypatch.setattr(
+        al, "get_setting", lambda key, default=None: settings.get(key, default)
+    )
+
+    def build():
+        messages, _ = al._build_system_prompt(
+            [{"role": "user", "content": "hi"}],
+            model="gpt-oss-120b",
+            active_document=None,
+            mcp_mgr=None,
+            suppress_skills=True,
+        )
+        return "\n".join(
+            str(m.get("content") or "") for m in messages if m.get("role") == "system"
+        )
+
+    off = build()
+    assert "```generate_image" not in off
+    cached_off = al._cached_base_prompt
+
+    settings["image_gen_enabled"] = True
+    on = build()
+    assert "```generate_image" in on
+    assert al._cached_base_prompt is not cached_off
+
+
 def test_full_surface_skips_similarity_retrieval(monkeypatch):
     import asyncio
 

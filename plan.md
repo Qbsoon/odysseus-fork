@@ -563,6 +563,50 @@ The user disabled many tools (96 → 42 sent) but the 19 `mcp__email__*`
    Not done (still optional): surfacing built-in servers in the Integrations
    list for per-tool control.
 
+### Implementation review (2026-11-04) + fixes
+
+Full review of Task 2 work start→now. Findings and dispositions:
+
+1. **Session-creation/model-switch prewarm was a silent no-op (HIGH) —
+   FIXED.** `create_session` / `rename_session` are sync `def` routes →
+   FastAPI threadpool, no running loop → `asyncio.create_task` raised and
+   the route's `except: pass` swallowed it. Fix: `_spawn_bg`
+   (`src/turn_prewarm.py`) now schedules via `run_coroutine_threadsafe`
+   onto the app loop captured at startup (`set_main_loop`, hooked in
+   `app.py` startup); the routes' bare `except: pass` became debug logs.
+   Test: `test_schedule_from_sync_route_context_uses_captured_loop`
+   (real loop in a background thread, schedule from sync context).
+2. **Prewarm compaction could race the next send (MEDIUM) — FIXED.**
+   `prewarm_compaction` now registers an in-flight future per session
+   (`_COMPACT_INFLIGHT`), and `build_chat_context` awaits
+   `wait_for_compaction(session_id)` at entry — the send never snapshots
+   half-compacted history or repeats the LLM summarization. Residual
+   narrow window (user sends within ~1s of response end, before the queue
+   job starts) behaves as before the prewarm existed — accepted.
+   Tests: waiter blocks while in flight / returns when idle / inflight
+   cleared on error.
+3. **`image_gen_enabled` missing from the prompt cache key (LOW) — FIXED.**
+   `_build_base_prompt` folds the setting into its disabled set but the
+   key didn't include it → stale cached prose after toggling. Now part of
+   the key. Test: `test_cache_key_busts_on_image_gen_setting`.
+4. Plan hygiene — email-disable tests confirmed run+passed (user);
+   Phase 2B H2/H5/H4 remain open checkboxes but were resolved by live
+   evidence (H2/H5 ruled out, H4 downgraded) — left as-is since they
+   describe fix branches that never fired.
+
+Notes confirmed, not defects: `_prepend_agent_directive` tool-followup
+rounds still vary the system message (live log: system_prompt_chars
+7021→8006 between rounds — those rounds miss Go's prefix cache);
+`_detect_admin_intent` flips and auto-escalation disabled-set additions
+change the cache key; `_primary_surface_full` ignores per-endpoint surface
+overrides; MCP catalog now always injected when MCP tools exist (small
+permanent token cost); `set_active_model` global side effect from prewarm.
+
+Verdict after fixes: core Task 2 work correct and live-verified; prewarm
+triggers now functional and race-guarded. Re-run:
+`pytest tests/test_turn_prewarm.py tests/test_full_inventory_prompt.py
+tests/test_chat_prep_timing.py tests/test_chat_helpers.py`.
+
 ### Email system disable switch (2026-11-04, user approved)
 
 User asked how to disable the email system entirely. Pieces: agent tools
@@ -576,7 +620,8 @@ index). Other built-ins unaffected. Documented in
 `scripts/generate_env_reference.py`, `website/configuration-reference.md`,
 and `.env.example`. Tests:
 `tests/test_builtin_mcp_email_disable.py` (email skipped + others still
-register; registers by default; narrow gate ≠ global MCP_DISABLED). Full
+register; registers by default; narrow gate ≠ global MCP_DISABLED) — run
+and passed 2026-11-04 (user confirmation). Full
 disable recipe: `ODYSSEUS_DISABLE_EMAIL_MCP=1` +
 `ODYSSEUS_INPROCESS_POLLERS=0` (email HTTP routes stay mounted but are
 inert without accounts).
