@@ -332,7 +332,13 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "pending_tool_approval.continuation_query" in route
     assert "persist_user_message=not tool_approval_continuation" in route
     assert "_mark_tool_approval_resolved(" in route
-    assert "_tool_approval_resolution_stream(decision)" in route
+    # Task 3: deny is a control-plane continuation, not a resolution-only
+    # stream — the run resumes without grants, with a fixed denial message
+    # and the denied operation seeded run-denied.
+    assert "_denied_tool_approval = pending_tool_approval" in route
+    assert "run_denied_signatures=" in route
+    assert "The user DENIED the proposed" in route
+    assert "tool_approval_resolved', 'decision': 'deny'" in route
     assert "Approved the exact" not in route
     assert "Denied the" not in route
     assert "continuation_context_message: str | None = None" in helpers

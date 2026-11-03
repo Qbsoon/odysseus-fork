@@ -41,6 +41,15 @@ their existing execution contract. No model weights or training settings change.
    silences that exact operation for the rest of the run. Explicit denials are
    never liftable by an approval, and surfaces with no one to answer
    (delegated, unattended, teacher runs) keep the hard denial.
+8. A Deny on an approval card is a control-plane continuation, not a turn
+   end: the run resumes with the sealed continuation context but none of the
+   denied action's grants, a fixed server-authored denial message (tool name
+   + bounded content digest, never the sealed content), and the denied
+   operation seeded run-denied — a retry returns an error result to the
+   model (`policy: "user_denied"`) and the run continues another way. The
+   marker is per-run: a new user message may propose the same action again
+   and get a fresh card. Surfaces with no resumable conversation (skills
+   tester, job coordinator) keep the hard stop.
 
 ## Verification
 

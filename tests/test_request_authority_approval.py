@@ -510,3 +510,48 @@ async def test_run_denied_operation_gets_the_error_without_a_card(monkeypatch):
     assert all(e.get("blocked") is True for e in outputs)
     assert not any(e.get("ask_user") for e in outputs)
     assert all("denied by the user" in e["output"] for e in outputs)
+
+
+@pytest.mark.asyncio
+async def test_user_denied_operation_is_blocked_even_when_granted(monkeypatch):
+    """Task 3: the run-denied marker blocks the operation at the dispatch
+    head regardless of whether the request authority would have granted it —
+    a user denial outranks the request text."""
+    _patch_loop_basics(monkeypatch)
+    content = json.dumps({"url": "https://www.spacex.com/launches/"})
+    denied = al._tool_call_signature("web_fetch", content)
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        yield (
+            "data: "
+            + json.dumps({"type": "tool_calls", "calls": [_fetch_call(1)]})
+            + "\n\n"
+        )
+        yield "data: [DONE]\n\n"
+
+    async def _fail_exec(block, *args, **kwargs):
+        raise AssertionError("denied operation reached the executor")
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", _fail_exec, raising=False)
+
+    chunks = await _collect(al.stream_agent_loop(
+        "https://api.openai.com/v1",
+        "local-model",
+        [{
+            "role": "user",
+            "content": (
+                "web_fetch https://www.spacex.com/launches/ and summarize "
+                "the launches listed there"
+            ),
+        }],
+        max_rounds=2,
+        relevant_tools={"web_search", "web_fetch"},
+        request_authority=authority("web_fetch", session_id="denied-granted"),
+        run_denied_signatures={denied},
+    ))
+    events = _events(chunks)
+    outputs = _fetch_outputs(events)
+    assert outputs
+    assert all(e.get("blocked") is True for e in outputs)
+    assert not any(e.get("ask_user") for e in outputs)
