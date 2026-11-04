@@ -20,6 +20,7 @@ from typing import Any, TYPE_CHECKING
 from src.tool_approval_scopes import (
     CHAT_SESSION_APPROVAL_DECISION,
     DENY_APPROVAL_DECISION,
+    SINGLE_ACTION_APPROVAL_DECISION,
     TASK_APPROVAL_DECISION,
     ToolApprovalScope,
     scope_for_decision,
@@ -215,6 +216,10 @@ class PendingToolApproval:
             # Scope wording must match what each scope actually grants here:
             # the approved tool's class of action for this request, plus the
             # chat-session untrusted-context bypass for later requests.
+            once_option_description = (
+                "Execute only this exact sealed action. Anything else this "
+                "request needs asks again."
+            )
             task_option_description = (
                 "Execute the sealed action and allow this same tool without "
                 "re-asking for the rest of this request. Current tool, "
@@ -228,6 +233,10 @@ class PendingToolApproval:
                 "apply."
             )
         else:
+            once_option_description = (
+                "Execute only this exact sealed action. Any other gated "
+                "action in this request asks again."
+            )
             task_option_description = (
                 "Execute the sealed action and allow every otherwise-gated "
                 "action needed to finish this request. Current tool, account, "
@@ -252,6 +261,11 @@ class PendingToolApproval:
                 "otherwise-gated actions needs your explicit approval."
             ),
             "options": [
+                {
+                    "label": "Allow once",
+                    "value": SINGLE_ACTION_APPROVAL_DECISION,
+                    "description": once_option_description,
+                },
                 {
                     "label": "Allow for this task",
                     "value": TASK_APPROVAL_DECISION,
@@ -288,11 +302,11 @@ class ExactToolApproval:
 
     pending: PendingToolApproval
     scope: ToolApprovalScope = ToolApprovalScope.TASK
-    # The seam consumed by agent_loop. Both chat-card allow choices cover the
-    # complete resumed task, because one-action scope there immediately
-    # re-entered the same gate on the next round. Callers with no resumable
-    # chat still get SINGLE_ACTION, which leaves the gate armed behind the
-    # sealed action.
+    # The seam consumed by agent_loop. The task and chat-session allow choices
+    # cover the complete resumed task, because one-action scope there
+    # immediately re-entered the same gate on the next round. The explicit
+    # Allow-once choice — and callers with no resumable chat — still get
+    # SINGLE_ACTION, which leaves the gate armed behind the sealed action.
     allow_remaining_actions: bool = True
     _claimed: bool = field(default=False, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -611,7 +625,8 @@ class ToolApprovalStore:
         one (the skill tester, unattended audits) pass ``False`` and get the
         original one-use grant, so a button labelled "Allow once" cannot widen
         into a run-long bypass just because the chat card reuses the same wire
-        value.
+        value. An explicit ``approve_once`` decision always keeps that one-use
+        meaning, even from a surface that could continue.
         """
         now = time.time()
         with self._lock:
@@ -633,7 +648,9 @@ class ToolApprovalStore:
         scope = scope_for_decision(normalized_decision)
         if scope is None:
             return None
-        if not allow_continuation:
+        if scope is ToolApprovalScope.SINGLE_ACTION or not allow_continuation:
+            # "Allow once" is the original one-use grant: the sealed action
+            # runs and the gate re-arms for everything after it.
             return ExactToolApproval(
                 pending,
                 scope=ToolApprovalScope.SINGLE_ACTION,
