@@ -2985,8 +2985,8 @@ function _answerAskUserCards(root, text) {
 // rendered option. Reuse the option's click path so the question keeps its
 // existing submission semantics. Tool approval cards are excluded: that card
 // exists to make consent deliberate after untrusted context influenced the
-// run, and its first option is the widest grant, so a stray digit must not
-// answer it.
+// run, and its options grant differing widths of authority, so a stray digit
+// must not answer it.
 function _handleAskUserShortcut(event) {
   if (
     event.defaultPrevented

@@ -12,9 +12,11 @@ logger = logging.getLogger(__name__)
 
 # Keep the existing wire values so the current route and no-build frontend do
 # not need a second protocol migration. ``approve`` no longer means one action;
-# it now selects chat-session scope.
+# it now selects chat-session scope. ``approve_once`` is the explicit one-use
+# choice on the chat card, so a resumable chat cannot widen it.
 TASK_APPROVAL_DECISION = "approve_task"
 CHAT_SESSION_APPROVAL_DECISION = "approve"
+SINGLE_ACTION_APPROVAL_DECISION = "approve_once"
 DENY_APPROVAL_DECISION = "deny"
 
 # Session.get_context_messages() adds this server-owned marker only when the
@@ -157,4 +159,6 @@ def scope_for_decision(decision: object) -> ToolApprovalScope | None:
         return ToolApprovalScope.TASK
     if normalized == CHAT_SESSION_APPROVAL_DECISION:
         return ToolApprovalScope.CHAT_SESSION
+    if normalized == SINGLE_ACTION_APPROVAL_DECISION:
+        return ToolApprovalScope.SINGLE_ACTION
     return None

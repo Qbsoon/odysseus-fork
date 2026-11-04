@@ -58,6 +58,29 @@ def test_single_action_grant_leaves_the_gate_armed_behind_the_sealed_action():
     assert resumed.decision_for("bash").allowed is False
 
 
+def test_allow_once_decision_keeps_one_use_scope_even_with_a_resumable_chat():
+    store = ToolApprovalStore()
+    pending = _pending(store, session_id="session-1")
+
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve_once",
+        owner="alice",
+        session_id="session-1",
+    )
+
+    assert grant is not None
+    assert grant.scope is ToolApprovalScope.SINGLE_ACTION
+    assert grant.allow_remaining_actions is False
+    assert grant.grants_chat_session is False
+
+    resumed = ToolRunSecurityContext(
+        external_untrusted_context_seen=True,
+        approval_gate_bypassed=grant.allow_remaining_actions,
+    )
+    assert resumed.decision_for("bash").allowed is False
+
+
 def test_chat_callers_still_get_the_continuation_scope_they_asked_for():
     store = ToolApprovalStore()
     pending = _pending(store, session_id="session-1")
